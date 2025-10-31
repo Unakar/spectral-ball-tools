@@ -80,22 +80,21 @@ def dmsign_vjp(
     return torch.nan_to_num(dA)
 
 
-# Backward-compatible alias: compute JVP via VJP inner-product if needed.
 @torch.no_grad()
-def dmsign(A: torch.Tensor, H: torch.Tensor, msign_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-           steps: int = 6, eps: float = 1e-3) -> torch.Tensor:
+def dmsign(
+    A: torch.Tensor,
+    C: torch.Tensor,
+    msign_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    steps: int = 6,
+    eps: float = 1e-3,
+) -> torch.Tensor:
     """
-    Convenience JVP using VJP identity:
-        For any H, define C = H. Then D msign_A[H] is not produced directly here;
-        however, for Newton's scalar derivative f'(λ) = <Θ, D msign_A[Θ]>, one can compute
-        f'(λ) = <dA, Θ> where dA = dmsign_vjp(A, C=Θ).
+    dmsign per dmsign.md (VJP/adjoint): given upstream gradient C wrt O = msign(A),
+    returns gradient wrt A: dA = ∇_A L.
 
-    This function returns a dummy zero to discourage misuse; prefer calling dmsign_vjp
-    to obtain the scalar derivative via inner-product.
+    Implementation via block-matrix mcsgn trick.
     """
-    raise NotImplementedError(
-        "Use dmsign_vjp(A, C, msign_fn) to form scalar derivatives; JVP is not explicitly constructed here."
-    )
+    return dmsign_vjp(A, C, msign_fn=msign_fn, steps=steps, eps=eps)
 
 
     
