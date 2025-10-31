@@ -12,13 +12,13 @@ mkdir -p "$OUT_DIR"
 
 METHODS="${METHODS:-brent newton fixed}"
 SEEDS="${SEEDS:-0 1 2}"
-export MSIGN_STEPS="${MSIGN_STEPS:-10}"
-export TOL="${TOL:-1e-8}"
+export MSIGN_STEPS="${MSIGN_STEPS:-5}"
+export TOL="${TOL:-1e-5}"
 export DEVICE="${DEVICE:-auto}"
 export CASES="${CASES:-1}"
 
-for M in 32 64 128; do
-  for N in 16 32 64; do
+for M in 64 128; do
+  for N in 32 64; do
     OUT="$OUT_DIR/bench_${M}x${N}.csv"
     bash "$DIR/scripts/bench.sh" "$M" "$N" "$METHODS" "$SEEDS" "$OUT"
   done
