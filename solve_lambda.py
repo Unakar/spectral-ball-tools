@@ -145,9 +145,9 @@ def brent_solve(
 ) -> SolveStats:
     # Based on Brent-Dekker method
     if fa == 0.0:
-        return SolveStats("brent", a, 0.0, 0, True, (a, b))
+        return SolveStats("brent", a, 0.0, 0, True, 0.0, 0, (a, b))
     if fb == 0.0:
-        return SolveStats("brent", b, 0.0, 0, True, (a, b))
+        return SolveStats("brent", b, 0.0, 0, True, 0.0, 0, (a, b))
     if fa * fb > 0:
         # Not bracketed; degrade to bisection on [a, b]
         pass
@@ -174,7 +174,7 @@ def brent_solve(
         tol = 2.0 * tol_x * max(1.0, abs(b))
         m = 0.5 * (a - b)
         if abs(m) <= tol or abs(fb) <= tol_f:
-            return SolveStats("brent", b, abs(fb), iterations, True, (a, b))
+            return SolveStats("brent", b, abs(fb), iterations, True, time.perf_counter()-t0, f_evals, (a, b))
 
         # Attempt inverse quadratic interpolation
         if abs(e) >= tol and abs(fc) > abs(fb):
@@ -240,7 +240,8 @@ def secant_solve(
         if abs(lam2 - lam1) <= tol_x * max(1.0, abs(lam1)):
             lam1 = lam2
             f1, _ = f_value(G, Theta, lam1, msign_steps)
-            return SolveStats("secant", lam1, abs(f1), iterations, True, history=history)
+            f_evals += 1
+            return SolveStats("secant", lam1, abs(f1), iterations, True, time.perf_counter()-t0, f_evals, history=history)
         lam0, f0, lam1 = lam1, f1, lam2
         f1, _ = f_value(G, Theta, lam1, msign_steps)
         history["lam"].append(lam1)
