@@ -18,7 +18,7 @@ ABC_LIST_STABLE: list[tuple[float, float, float]] = [
 
 
 @torch.no_grad()
-def msign(G: torch.Tensor, steps: int = 10) -> torch.Tensor:
+def msign(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
     """
     Polar Express algorithm for the matrix sign function:
     https://arxiv.org/abs/2505.16932

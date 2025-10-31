@@ -3,7 +3,7 @@ from typing import Tuple, Optional, Callable
 
 
 @torch.no_grad()
-def mcsgn(M: torch.Tensor, steps: int = 6, eps: float = 1e-20) -> torch.Tensor:
+def mcsgn(M: torch.Tensor, steps: int = 5, eps: float = 1e-20) -> torch.Tensor:
     """
     Matrix sign for square matrices via stabilized 5th-order polynomial iteration.
     Uses coefficients consistent with the reference in dmsign.md (already scaled).

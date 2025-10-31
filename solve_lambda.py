@@ -453,13 +453,13 @@ def run_one(
 
 def main():
     parser = argparse.ArgumentParser(description="Solve f(lam)=<Theta, msign(G+lam Theta)>=0 using multiple algorithms.")
-    parser.add_argument("--method", type=str, default="brent", choices=["brent", "secant", "fixed", "eq10", "newton", "all"],
+    parser.add_argument("--method", type=str, default="brent", choices=["brent", "secant", "fixed", "newton", "all"],
                         help="Root-finding method")
     parser.add_argument("--m", type=int, default=64, help="Row dimension of matrices")
     parser.add_argument("--n", type=int, default=32, help="Column dimension of matrices")
     parser.add_argument("--device", type=str, default="auto", help="cpu|cuda|auto")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--msign-steps", type=int, default=10, help="Iteration steps for msign operator")
+    parser.add_argument("--msign-steps", type=int, default=5, help="Iteration steps for msign operator")
     parser.add_argument("--tol", type=float, default=1e-8, help="Tolerance for |f|")
     parser.add_argument("--max-iters", type=int, default=100, help="Max iterations for solvers")
     parser.add_argument("--rank1-theta", action="store_true", help="Use rank-1 Theta (recommended)")
