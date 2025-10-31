@@ -1,5 +1,7 @@
 # Spectral Ball Tools
 
+[中文文档 | Chinese Version](README_zh.md)
+
 This toolbox solves and benchmarks numerical strategies for the scalar root-finding problem that arises in **constrained spectral-norm matrix optimization**:
 
 $$
@@ -118,12 +120,4 @@ bash scripts/bench_grid.sh results/
 
 
 ---
-
-## ✅ Recommendation
-
-- **Use Newton** if `dmsign` is available → fastest convergence.
-- **Use Brent** otherwise → robust, no tuning, globally convergent.
-- **Avoid the fixed-point method** unless replicating legacy results—it lacks convergence guarantees and is outperformed by modern scalar solvers.
-
-This toolbox treats the core problem as what it is: **a well-conditioned scalar root-finding task**. Leverage decades of numerical analysis—don’t reinvent fixed-point heuristics.
 
