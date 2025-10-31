@@ -4,7 +4,7 @@
 
   f(λ) = <Θ, msign(G + λ Θ)> = 0
 
-其中 msign(·) 为极分解的单位因子（polar unitary factor），即 A = U P，U = msign(A)，P = (A^T A)^{1/2}。脚本集成了多种一维根求解算法，便于比较收敛性与数值精度。
+其中 msign(·) 矩阵核范数。脚本集成了多种一维根求解算法，便于比较收敛性与数值精度。
 
 本文档介绍：
 - 算法原理与来龙去脉
@@ -19,7 +19,7 @@
 - A(λ) = G + λ Θ，Φ(λ) = msign(A(λ))。
 - 目标方程：f(λ) = <Θ, Φ(λ)> = 0（Frobenius 内积）。
 
-msign 的高效实现位于 `dev/zhihu/msign.py`，采用多项式迭代（Polar Express 风格）。
+msign 的高效实现位于 `msign.py`，采用多项式迭代（Polar Express 风格）。
 
 ----------------------------------------
 
@@ -36,9 +36,9 @@ msign 的高效实现位于 `dev/zhihu/msign.py`，采用多项式迭代（Polar
 
 ----------------------------------------
 
-## 固定点法（fixed，原 eq10）
+## 固定点法（fixed）
 
-思路：将“公式(10)”重写为预条件的残差迭代
+写为预条件的残差迭代
 
   λ_{k+1} = λ_k − c(λ_k) · f(λ_k)
 
@@ -92,7 +92,7 @@ msign 的高效实现位于 `dev/zhihu/msign.py`，采用多项式迭代（Polar
 - VJP 给出：dA = X − O X^T O，则 f'(λ) = <dA, Θ>。
 
 实现要点：
-- `dev/zhihu/dmsign.py` 提供 `dmsign_vjp(A, C, msign_fn)`，完全基于已有的 `msign` 与 `mcsgn`，不需要 SVD/EVD。
+- `dmsign.py` 提供 `dmsign_vjp(A, C, msign_fn)`，完全基于已有的 `msign` 与 `mcsgn`，不需要 SVD/EVD。
 - `solve_lambda.py` 中的 `newton_solve` 优先调用 `dmsign_vjp` 求导；不可用时退回中心差分近似。
 - 目前未加线搜索/保括号的全局化包装，如需要可扩展。
 
@@ -133,13 +133,13 @@ msign 的高效实现位于 `dev/zhihu/msign.py`，采用多项式迭代（Polar
 基本用法：
 
 - Brent（默认）：
-  - `python3 dev/zhihu/solve_lambda.py --method brent --m 64 --n 32 --seed 0 --device auto`
+  - `python3 solve_lambda.py --method brent --m 64 --n 32 --seed 0 --device auto`
 - 固定点法（原 eq10，现推荐名 fixed）：
-  - `python3 dev/zhihu/solve_lambda.py --method fixed --m 64 --n 32`
+  - `python3 solve_lambda.py --method fixed --m 64 --n 32`
 - Newton（若 dmsign_vjp 可用会用解析导数，否则差分）：
-  - `python3 dev/zhihu/solve_lambda.py --method newton --m 64 --n 32`
+  - `python3 solve_lambda.py --method newton --m 64 --n 32`
 - 依次跑全套：
-  - `python3 dev/zhihu/solve_lambda.py --method all --m 64 --n 32 --seed 0`
+  - `python3 solve_lambda.py --method all --m 64 --n 32 --seed 0`
 
 常用参数：
 
@@ -181,8 +181,8 @@ msign 的高效实现位于 `dev/zhihu/msign.py`，采用多项式迭代（Polar
 
 ## 相关文件
 
-- `dev/zhihu/msign.py`：msign 算子（多项式迭代）。
-- `dev/zhihu/dmsign.md`：dmsign 推导与实现说明（mcsgn 块矩阵法）。
-- `dev/zhihu/dmsign.py`：dmsign 实现（包含 `mcsgn` 与 `dmsign_vjp`）。
-- `dev/zhihu/solve_lambda.py`：本文档对应的测试与求解脚本。
+- `msign.py`：msign 算子（多项式迭代）。
+- `dmsign.md`：dmsign 推导与实现说明（mcsgn 块矩阵法）。
+- `dmsign.py`：dmsign 实现（包含 `mcsgn` 与 `dmsign_vjp`）。
+- `solve_lambda.py`：本文档对应的测试与求解脚本。
 
