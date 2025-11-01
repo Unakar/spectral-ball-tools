@@ -1,182 +1,140 @@
-import argparse
 import math
 from dataclasses import dataclass
-import time
-from typing import Callable, Optional, Tuple, Dict, Any
-
+from typing import Tuple, Dict, Any
 import torch
-import importlib.util
-from pathlib import Path
 
-# Local operators: load directly from file to avoid package requirements
-_HERE = Path(__file__).resolve().parent
-_MSIGN_PY = _HERE / "msign.py"
-_DMSIGN_PY = _HERE / "dmsign.py"
+from msign import msign
+from dmsign import dmsign, dmsign_vjp
 
 
-def _load_function(module_path: Path, func_name: str):
-    if not module_path.exists():
-        return None
-    spec = importlib.util.spec_from_file_location(module_path.stem, str(module_path))
-    if spec is None or spec.loader is None:
-        return None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return getattr(mod, func_name, None)
-
-
-phi_msign = _load_function(_MSIGN_PY, "msign")
-if phi_msign is None:
-    raise ImportError(f"Cannot load msign from {_MSIGN_PY}")
-
-dmsign_op = _load_function(_DMSIGN_PY, "dmsign")
-dmsign_vjp_op = _load_function(_DMSIGN_PY, "dmsign_vjp")
-
-
-Tensor = torch.Tensor
-
-
-def set_device(dev: str) -> torch.device:
-    if dev == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(dev)
-
-
-def frob_inner(x: Tensor, y: Tensor) -> Tensor:
+def frobenius_inner(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Frobenius inner product: sum(x * y)."""
     return (x * y).sum()
 
 
-def nuclear_norm(a: Tensor) -> Tensor:
-    # sum of singular values
+def nuclear_norm(a: torch.Tensor) -> torch.Tensor:
+    """Sum of singular values."""
     s = torch.linalg.svdvals(a)
     return s.sum()
 
 
-def phi_ref_polar(a: Tensor) -> Tensor:
-    # Reference polar factor via SVD: A = U S V^T => U_polar = U V^T (rectangular-friendly)
+def polar_factor_via_svd(a: torch.Tensor) -> torch.Tensor:
+    """Compute the polar factor U V^T via SVD: A = U S V^T => Polar = U V^T."""
     U, _, Vh = torch.linalg.svd(a, full_matrices=False)
     return U @ Vh
 
 
-def f_value(G: Tensor, Theta: Tensor, lam: float, msign_steps: int = 10) -> Tuple[float, Tensor]:
+def objective_value(G: torch.Tensor, Theta: torch.Tensor, lam: float, msign_steps: int = 10) -> Tuple[float, torch.Tensor]:
+    """Compute f(lam) = <Theta, msign(G + lam * Theta)> and the polar estimate."""
     A = G + lam * Theta
-    Phi = phi_msign(A, steps=msign_steps)
-    f = frob_inner(Theta, Phi).item()
-    return f, Phi
+    Phi = msign(A, steps=msign_steps)
+    f_val = frobenius_inner(Theta, Phi).item()
+    return f_val, Phi
 
 
-def eq10_step_c(A: Tensor, Theta: Tensor) -> float:
-    # c(lam) = tr(P) / (m * tr(Theta^T Theta)) ; with P = (A^T A)^{1/2}
-    # tr(P) = nuclear norm of A
-    m_rows = A.shape[-2]
-    tr_Theta2 = float((Theta * Theta).sum().item())
+def compute_step_size(A: torch.Tensor, Theta: torch.Tensor) -> float:
+    """
+    Compute c = ||A||_* / (m * ||Theta||_F^2), used in fixed-point iteration.
+    This corresponds to Eq. (10) in the paper.
+    """
+    m = A.shape[-2]
+    tr_Theta_sq = float((Theta * Theta).sum().item())
     trP = float(nuclear_norm(A).item())
-    # Guard against divide-by-zero
-    denom = max(1e-12, m_rows * tr_Theta2)
+    denom = max(1e-12, m * tr_Theta_sq)
     return trP / denom
 
 
 @dataclass
-class SolveStats:
+class SolverResult:
     method: str
-    lam: float
-    f_abs: float
+    solution: float
+    residual: float
     iterations: int
     converged: bool
     time_sec: float = 0.0
-    f_evals: int = 0
-    bracket: Optional[Tuple[float, float]] = None
-    history: Optional[Dict[str, Any]] = None
+    function_evaluations: int = 0
+    bracket: Tuple[float, float] | None = None
+    history: Dict[str, Any] | None = None
 
 
-def bracket_find(
-    G: Tensor,
-    Theta: Tensor,
-    lam0: float = 0.0,
-    init_step: float = 1.0,
-    max_expand: int = 60,
+def find_bracket(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    initial_guess: float = 0.0,
+    step_size: float = 1.0,
+    max_expansions: int = 60,
     msign_steps: int = 10,
 ) -> Tuple[float, float, float, float, int]:
+    """Expand around initial_guess to find an interval [a, b] where f(a)*f(b) <= 0."""
     f_evals = 0
-    f0, _ = f_value(G, Theta, lam0, msign_steps)
+    f0, _ = objective_value(G, Theta, initial_guess, msign_steps)
     f_evals += 1
     if f0 == 0.0:
-        return lam0, lam0, f0, f0, f_evals
+        return initial_guess, initial_guess, f0, f0, f_evals
 
-    # Expand in both directions to find sign change
-    a = lam0
-    b = lam0
-    fa = f0
-    fb = f0
-    step = init_step if init_step > 0 else 1.0
+    a = b = initial_guess
+    fa = fb = f0
+    step = step_size if step_size > 0 else 1.0
 
-    for k in range(max_expand):
-        # Expand right
-        b = lam0 + step
-        fb, _ = f_value(G, Theta, b, msign_steps)
+    for _ in range(max_expansions):
+        # Try right
+        b = initial_guess + step
+        fb, _ = objective_value(G, Theta, b, msign_steps)
         f_evals += 1
         if fa * fb <= 0:
-            return ((a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals))
+            return (a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals)
 
-        # Expand left
-        a = lam0 - step
-        fa, _ = f_value(G, Theta, a, msign_steps)
+        # Try left
+        a = initial_guess - step
+        fa, _ = objective_value(G, Theta, a, msign_steps)
         f_evals += 1
         if fa * fb <= 0:
-            return ((a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals))
+            return (a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals)
 
         step *= 2.0
 
-    # As a fallback, return the widest interval checked
-    return (min(a, b), max(a, b), fa, fb, f_evals)
+    return min(a, b), max(a, b), fa, fb, f_evals
 
 
-def brent_solve(
-    G: Tensor,
-    Theta: Tensor,
+def solve_with_brent(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
     a: float,
     b: float,
     fa: float,
     fb: float,
-    tol_f: float = 1e-8,
-    tol_x: float = 1e-10,
-    max_iter: int = 100,
+    tolerance_f: float = 1e-8,
+    tolerance_x: float = 1e-10,
+    max_iterations: int = 100,
     msign_steps: int = 10,
-) -> SolveStats:
-    # Based on Brent-Dekker method
+) -> SolverResult:
+    import time
+
     if fa == 0.0:
-        return SolveStats("brent", a, 0.0, 0, True, 0.0, 0, (a, b))
+        return SolverResult("brent", a, 0.0, 0, True, 0.0, 0, (a, b))
     if fb == 0.0:
-        return SolveStats("brent", b, 0.0, 0, True, 0.0, 0, (a, b))
-    if fa * fb > 0:
-        # Not bracketed; degrade to bisection on [a, b]
-        pass
+        return SolverResult("brent", b, 0.0, 0, True, 0.0, 0, (a, b))
 
-    c = a
-    fc = fa
+    c, fc = a, fa
     d = e = b - a
-    lam = b
-    fl = fb
-    iterations = 0
-
-    t0 = time.perf_counter()
+    lam, fl = b, fb
+    start_time = time.perf_counter()
     f_evals = 0
-    for iterations in range(1, max_iter + 1):
+
+    for it in range(1, max_iterations + 1):
         if fl == 0.0:
-            return SolveStats("brent", lam, 0.0, iterations, True, time.perf_counter()-t0, f_evals, (a, b))
+            return SolverResult("brent", lam, 0.0, it, True, time.perf_counter() - start_time, f_evals, (a, b))
         if fa * fb > 0:
             a, fa = c, fc
             d = e = b - a
         if abs(fa) < abs(fb):
-            c, fc, a, fa, b, fb = b, fb, a, fa, c, fc
+            a, fa, b, fb, c, fc = c, fc, a, fa, b, fb
 
-        # Convergence tests
-        tol = 2.0 * tol_x * max(1.0, abs(b))
-        m = 0.5 * (a - b)
-        if abs(m) <= tol or abs(fb) <= tol_f:
-            return SolveStats("brent", b, abs(fb), iterations, True, time.perf_counter()-t0, f_evals, (a, b))
+        tol = 2.0 * tolerance_x * max(1.0, abs(b))
+        m = 0.5 * (c - b)
+        if abs(m) <= tol or abs(fb) <= tolerance_f:
+            return SolverResult("brent", b, abs(fb), it, True, time.perf_counter() - start_time, f_evals, (a, b))
 
-        # Attempt inverse quadratic interpolation
         if abs(e) >= tol and abs(fc) > abs(fb):
             s = fb / fc
             if a == c:
@@ -190,306 +148,234 @@ def brent_solve(
             if p > 0:
                 q = -q
             p = abs(p)
-            accept = (2.0 * p < min(3.0 * m * q - abs(tol * q), abs(e * q)))
-            if accept:
+            if 2.0 * p < min(3.0 * m * q - abs(tol * q), abs(e * q)):
                 e, d = d, p / q
             else:
-                d = m
-                e = m
+                d = e = m
         else:
-            d = m
-            e = m
+            d = e = m
 
-        # Move
         c, fc = b, fb
         if abs(d) > tol:
             b += d
         else:
             b += tol if m > 0 else -tol
 
-        fb, _ = f_value(G, Theta, b, msign_steps)
+        fb, _ = objective_value(G, Theta, b, msign_steps)
         f_evals += 1
 
-    return SolveStats("brent", b, abs(fb), iterations, False, time.perf_counter()-t0, f_evals, (a, b))
+    return SolverResult("brent", b, abs(fb), max_iterations, False, time.perf_counter() - start_time, f_evals, (a, b))
 
 
-def secant_solve(
-    G: Tensor,
-    Theta: Tensor,
-    lam0: float,
-    lam1: float,
-    tol_f: float = 1e-8,
-    tol_x: float = 1e-10,
-    max_iter: int = 100,
+def solve_with_secant(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    x0: float,
+    x1: float,
+    tolerance_f: float = 1e-8,
+    tolerance_x: float = 1e-10,
+    max_iterations: int = 100,
     msign_steps: int = 10,
-) -> SolveStats:
-    t0 = time.perf_counter()
-    f0, _ = f_value(G, Theta, lam0, msign_steps)
-    f1, _ = f_value(G, Theta, lam1, msign_steps)
-    iterations = 0
-    history = {"lam": [lam0, lam1], "f": [f0, f1]}
-    f_evals = 2
+) -> SolverResult:
+    import time
 
-    for iterations in range(2, max_iter + 1):
-        if abs(f1) <= tol_f:
-            return SolveStats("secant", lam1, abs(f1), iterations, True, time.perf_counter()-t0, f_evals, history=history)
-        denom = (f1 - f0)
+    f0, _ = objective_value(G, Theta, x0, msign_steps)
+    f1, _ = objective_value(G, Theta, x1, msign_steps)
+    history = {"solution": [x0, x1], "residual": [f0, f1]}
+    f_evals = 2
+    start_time = time.perf_counter()
+
+    for it in range(2, max_iterations + 1):
+        if abs(f1) <= tolerance_f:
+            return SolverResult("secant", x1, abs(f1), it, True, time.perf_counter() - start_time, f_evals, history=history)
+        denom = f1 - f0
         if denom == 0:
             break
-        lam2 = lam1 - f1 * (lam1 - lam0) / denom
-        if abs(lam2 - lam1) <= tol_x * max(1.0, abs(lam1)):
-            lam1 = lam2
-            f1, _ = f_value(G, Theta, lam1, msign_steps)
+        x2 = x1 - f1 * (x1 - x0) / denom
+        if abs(x2 - x1) <= tolerance_x * max(1.0, abs(x1)):
+            x1 = x2
+            f1, _ = objective_value(G, Theta, x1, msign_steps)
             f_evals += 1
-            return SolveStats("secant", lam1, abs(f1), iterations, True, time.perf_counter()-t0, f_evals, history=history)
-        lam0, f0, lam1 = lam1, f1, lam2
-        f1, _ = f_value(G, Theta, lam1, msign_steps)
-        history["lam"].append(lam1)
-        history["f"].append(f1)
+            return SolverResult("secant", x1, abs(f1), it, True, time.perf_counter() - start_time, f_evals, history=history)
+        x0, f0, x1 = x1, f1, x2
+        f1, _ = objective_value(G, Theta, x1, msign_steps)
+        history["solution"].append(x1)
+        history["residual"].append(f1)
         f_evals += 1
 
-    return SolveStats("secant", lam1, abs(f1), iterations, False, time.perf_counter()-t0, f_evals, history=history)
+    return SolverResult("secant", x1, abs(f1), max_iterations, False, time.perf_counter() - start_time, f_evals, history=history)
 
 
-def fixed_point_solve(
-    G: Tensor,
-    Theta: Tensor,
-    lam0: float = 0.0,
-    tol_f: float = 1e-8,
-    max_iter: int = 200,
+def solve_with_fixed_point(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    initial_guess: float = 0.0,
+    tolerance_f: float = 1e-8,
+    max_iterations: int = 200,
     msign_steps: int = 10,
     damping: float = 1.0,
-    backtrack: bool = True,
-) -> SolveStats:
-    lam = lam0
-    f, _ = f_value(G, Theta, lam, msign_steps)
-    history = {"lam": [lam], "f": [f]}
-    iterations = 0
-    t0 = time.perf_counter()
+    use_backtracking: bool = True,
+) -> SolverResult:
+    import time
+
+    lam = initial_guess
+    f, _ = objective_value(G, Theta, lam, msign_steps)
+    history = {"solution": [lam], "residual": [f]}
     f_evals = 1
+    start_time = time.perf_counter()
 
-    for iterations in range(1, max_iter + 1):
-        if abs(f) <= tol_f:
-            return SolveStats("fixed", lam, abs(f), iterations, True, time.perf_counter()-t0, f_evals, history=history)
+    for it in range(1, max_iterations + 1):
+        if abs(f) <= tolerance_f:
+            return SolverResult("fixed_point", lam, abs(f), it, True, time.perf_counter() - start_time, f_evals, history=history)
+
         A = G + lam * Theta
-        c = eq10_step_c(A, Theta) * max(1e-3, damping)
-        new_lam = lam - c * f
+        step_size = compute_step_size(A, Theta) * max(1e-3, damping)
+        new_lam = lam - step_size * f
 
-        new_f, _ = f_value(G, Theta, new_lam, msign_steps)
+        new_f, _ = objective_value(G, Theta, new_lam, msign_steps)
         f_evals += 1
-        if backtrack and abs(new_f) > abs(f):
-            # Try half steps to avoid oscillation
-            ok = False
+
+        if use_backtracking and abs(new_f) > abs(f):
+            success = False
             for _ in range(8):
-                c *= 0.5
-                new_lam = lam - c * f
-                new_f, _ = f_value(G, Theta, new_lam, msign_steps)
+                step_size *= 0.5
+                new_lam = lam - step_size * f
+                new_f, _ = objective_value(G, Theta, new_lam, msign_steps)
                 f_evals += 1
                 if abs(new_f) <= abs(f):
-                    ok = True
+                    success = True
                     break
-            if not ok:
-                # accept the best so far even if not decreasing much
-                pass
+            if not success:
+                pass  # accept anyway
 
-        lam = new_lam
-        f = new_f
-        history["lam"].append(lam)
-        history["f"].append(f)
+        lam, f = new_lam, new_f
+        history["solution"].append(lam)
+        history["residual"].append(f)
 
-    return SolveStats("fixed", lam, abs(f), iterations, False, time.perf_counter()-t0, f_evals, history=history)
+    return SolverResult("fixed_point", lam, abs(f), max_iterations, False, time.perf_counter() - start_time, f_evals, history=history)
 
 
-def newton_solve(
-    G: Tensor,
-    Theta: Tensor,
-    lam0: float = 0.0,
-    tol_f: float = 1e-10,
-    tol_x: float = 1e-10,
-    max_iter: int = 50,
+def solve_with_newton(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    initial_guess: float = 0.0,
+    tolerance_f: float = 1e-10,
+    tolerance_x: float = 1e-10,
+    max_iterations: int = 50,
     msign_steps: int = 10,
-    numeric_derivative: bool = True,
-    fd_eps: float = 1e-4,
-) -> SolveStats:
-    lam = lam0
-    f, Phi = f_value(G, Theta, lam, msign_steps)
-    history = {"lam": [lam], "f": [f]}
-    iterations = 0
-    t0 = time.perf_counter()
+    use_numeric_derivative: bool = True,
+    finite_diff_eps: float = 1e-4,
+) -> SolverResult:
+    import time
+
+    lam = initial_guess
+    f, Phi = objective_value(G, Theta, lam, msign_steps)
+    history = {"solution": [lam], "residual": [f]}
     f_evals = 1
+    start_time = time.perf_counter()
 
-    for iterations in range(1, max_iter + 1):
-        if abs(f) <= tol_f:
-            return SolveStats("newton", lam, abs(f), iterations, True, time.perf_counter()-t0, f_evals, history=history)
+    for it in range(1, max_iterations + 1):
+        if abs(f) <= tolerance_f:
+            return SolverResult("newton", lam, abs(f), it, True, time.perf_counter() - start_time, f_evals, history=history)
 
-        if (dmsign_vjp_op is not None) and (not numeric_derivative):
+        if not use_numeric_derivative:
             A = G + lam * Theta
-            dA = dmsign_vjp_op(A, Theta, msign_fn=phi_msign)
-            fp = float(frob_inner(dA, Theta).item())
-        elif (dmsign_op is not None) and (not numeric_derivative):
-            A = G + lam * Theta
-            dPhi = dmsign_op(A, Theta, msign_fn=phi_msign)
-            fp = float(frob_inner(Theta, dPhi).item())
-        else:
-            # Finite-difference derivative fallback
-            h = fd_eps * max(1.0, abs(lam))
-            fph, _ = f_value(G, Theta, lam + h, msign_steps)
-            fmh, _ = f_value(G, Theta, lam - h, msign_steps)
+            if dmsign_vjp is not None:
+                dA = dmsign_vjp(A, Theta, msign_fn=msign)
+                fp = float(frobenius_inner(dA, Theta).item())
+            elif dmsign is not None:
+                dPhi = dmsign(A, Theta, msign_fn=msign)
+                fp = float(frobenius_inner(Theta, dPhi).item())
+            else:
+                use_numeric_derivative = True
+
+        if use_numeric_derivative:
+            h = finite_diff_eps * max(1.0, abs(lam))
+            fph, _ = objective_value(G, Theta, lam + h, msign_steps)
+            fmh, _ = objective_value(G, Theta, lam - h, msign_steps)
             f_evals += 2
             fp = (fph - fmh) / (2.0 * h)
 
         if fp == 0.0 or not math.isfinite(fp):
             break
+
         step = f / fp
         new_lam = lam - step
-        if abs(new_lam - lam) <= tol_x * max(1.0, abs(lam)):
+        if abs(new_lam - lam) <= tolerance_x * max(1.0, abs(lam)):
             lam = new_lam
-            f, _ = f_value(G, Theta, lam, msign_steps)
+            f, _ = objective_value(G, Theta, lam, msign_steps)
             f_evals += 1
-            history["lam"].append(lam)
-            history["f"].append(f)
-            return SolveStats("newton", lam, abs(f), iterations, True, time.perf_counter()-t0, f_evals, history=history)
+            history["solution"].append(lam)
+            history["residual"].append(f)
+            return SolverResult("newton", lam, abs(f), it, True, time.perf_counter() - start_time, f_evals, history=history)
+
         lam = new_lam
-        f, _ = f_value(G, Theta, lam, msign_steps)
+        f, _ = objective_value(G, Theta, lam, msign_steps)
         f_evals += 1
-        history["lam"].append(lam)
-        history["f"].append(f)
+        history["solution"].append(lam)
+        history["residual"].append(f)
 
-    return SolveStats("newton", lam, abs(f), iterations, False, time.perf_counter()-t0, f_evals, history=history)
+    return SolverResult("newton", lam, abs(f), max_iterations, False, time.perf_counter() - start_time, f_evals, history=history)
 
 
-def generate_case(
-    m: int,
-    n: int,
-    rank1_theta: bool = True,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
-    seed: Optional[int] = None,
-) -> Tuple[Tensor, Tensor]:
-    if seed is not None:
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+def generate_test_matrices(m: int, n: int, seed: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Generate random G and normalized Theta (full-rank by default)."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    G = torch.randn(m, n, device=device, dtype=dtype)
-
-    if rank1_theta:
-        u = torch.randn(m, 1, device=device, dtype=dtype)
-        v = torch.randn(1, n, device=device, dtype=dtype)
-        Theta = u @ v  # rank-1
-    else:
-        Theta = torch.randn(m, n, device=device, dtype=dtype)
-
-    # Normalize Theta to avoid scaling pathologies
-    Theta = Theta / (Theta.norm() + 1e-12)
+    G = torch.randn(m, n, device=device, dtype=torch.float32)
+    Theta = torch.randn(m, n, device=device, dtype=torch.float32)
+    Theta = Theta / (Theta.norm() + 1e-12)  # Normalize to avoid scale issues
     return G, Theta
 
 
-def run_one(
-    method: str,
-    m: int,
-    n: int,
-    device: torch.device,
-    seed: int,
-    msign_steps: int,
-    tol: float,
-    max_iter: int,
-    rank1_theta: bool,
-    verbose: bool = True,
-    compare_ref_phi: bool = True,
-) -> None:
-    G, Theta = generate_case(m, n, rank1_theta, device=device, dtype=torch.float32, seed=seed)
+def run_solver_demo(method: str = "brent") -> None:
+    """Run a single demo case with clean output."""
+    G, Theta = generate_test_matrices(m=64, n=32, seed=42)
+    msign_steps = 5
+    tol = 1e-8
+    max_iter = 100
 
-    # Baseline function at 0
-    f0, Phi0 = f_value(G, Theta, 0.0, msign_steps)
+    print("=== Demo: Solving ⟨Θ, msign(G + λΘ)⟩ = 0 ===")
 
-    # Optional: compare msign against high-precision polar reference
-    if compare_ref_phi:
-        with torch.no_grad():
-            Phi_ref0 = phi_ref_polar(G)
-            rel_phi_err = float((Phi0 - Phi_ref0).norm().item() / (Phi_ref0.norm().item() + 1e-12))
-    else:
-        rel_phi_err = float("nan")
+    # Baseline at λ=0
+    f0, Phi0 = objective_value(G, Theta, 0.0, msign_steps)
+    Phi_ref0 = polar_factor_via_svd(G)
+    rel_err0 = (Phi0 - Phi_ref0).norm().item() / (Phi_ref0.norm().item() + 1e-12)
+    print(f"f(0) = {f0:.6e}, polar error at λ=0: {rel_err0:.3e}")
 
-    if verbose:
-        print(f"Case seed={seed} | f(0)={f0:.6e} | rel_phi_err@0={rel_phi_err:.3e}")
-
-    stats: SolveStats
+    # Solve
     if method == "brent":
-        a, b, fa, fb, _ = bracket_find(G, Theta, 0.0, init_step=1.0, max_expand=60, msign_steps=msign_steps)
+        a, b, fa, fb, _ = find_bracket(G, Theta, msign_steps=msign_steps)
         if fa * fb > 0:
-            print("[brent] Failed to bracket a sign change. Falling back to secant from endpoints.")
-            stats = secant_solve(G, Theta, a, b, tol_f=tol, max_iter=max_iter, msign_steps=msign_steps)
+            print("[Warning] Could not bracket root; falling back to secant.")
+            result = solve_with_secant(G, Theta, a, b, tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
         else:
-            stats = brent_solve(G, Theta, a, b, fa, fb, tol_f=tol, max_iter=max_iter, msign_steps=msign_steps)
+            result = solve_with_brent(G, Theta, a, b, fa, fb, tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
     elif method == "secant":
-        # Use bracket seeds if possible
-        a, b, fa, fb, _ = bracket_find(G, Theta, 0.0, init_step=1.0, max_expand=60, msign_steps=msign_steps)
-        lam0, lam1 = (a, b) if a != b else (0.0, 1.0)
-        stats = secant_solve(G, Theta, lam0, lam1, tol_f=tol, max_iter=max_iter, msign_steps=msign_steps)
-    elif method in ("fixed", "eq10"):
-        stats = fixed_point_solve(G, Theta, lam0=0.0, tol_f=tol, max_iter=max_iter, msign_steps=msign_steps)
+        a, b, _, _, _ = find_bracket(G, Theta, msign_steps=msign_steps)
+        x0, x1 = (a, b) if a != b else (0.0, 1.0)
+        result = solve_with_secant(G, Theta, x0, x1, tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
+    elif method == "fixed_point":
+        result = solve_with_fixed_point(G, Theta, tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
     elif method == "newton":
-        # Prefer analytic derivative if dmsign is available
-        use_numeric = dmsign_op is None
-        stats = newton_solve(G, Theta, lam0=0.0, tol_f=tol, max_iter=max_iter, msign_steps=msign_steps,
-                             numeric_derivative=use_numeric)
+        result = solve_with_newton(G, Theta, tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps, use_numeric_derivative=True)
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    if verbose:
-        print(
-            f"[{stats.method}] lam={stats.lam:.10f} | |f|={stats.f_abs:.3e} "
-            f"| iters={stats.iterations} | f_evals={stats.f_evals} | time={stats.time_sec*1e3:.1f} ms | converged={stats.converged}"
-        )
+    # Final check
+    f_sol, Phi_sol = objective_value(G, Theta, result.solution, msign_steps)
+    Phi_ref_sol = polar_factor_via_svd(G + result.solution * Theta)
+    rel_err_sol = (Phi_sol - Phi_ref_sol).norm().item() / (Phi_ref_sol.norm().item() + 1e-12)
 
-    # Sanity: check f at solution and report phi-accuracy at solution vs reference
-    f_sol, Phi_sol = f_value(G, Theta, stats.lam, msign_steps)
-    Phi_ref_sol = phi_ref_polar(G + stats.lam * Theta)
-    rel_phi_err_sol = float((Phi_sol - Phi_ref_sol).norm().item() / (Phi_ref_sol.norm().item() + 1e-12))
-    if verbose:
-        print(f"Check: f(lam)={f_sol:.6e}, rel_phi_err@lam={rel_phi_err_sol:.3e}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Solve f(lam)=<Theta, msign(G+lam Theta)>=0 using multiple algorithms.")
-    parser.add_argument("--method", type=str, default="brent", choices=["brent", "secant", "fixed", "newton", "all"],
-                        help="Root-finding method")
-    parser.add_argument("--m", type=int, default=64, help="Row dimension of matrices")
-    parser.add_argument("--n", type=int, default=32, help="Column dimension of matrices")
-    parser.add_argument("--device", type=str, default="auto", help="cpu|cuda|auto")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--msign-steps", type=int, default=5, help="Iteration steps for msign operator")
-    parser.add_argument("--tol", type=float, default=1e-8, help="Tolerance for |f|")
-    parser.add_argument("--max-iters", type=int, default=100, help="Max iterations for solvers")
-    parser.add_argument("--rank1-theta", action="store_true", help="Use rank-1 Theta (recommended)")
-    parser.add_argument("--no-rank1-theta", dest="rank1_theta", action="store_false")
-    parser.set_defaults(rank1_theta=True)
-    parser.add_argument("--cases", type=int, default=1, help="Number of random cases to run")
-    parser.add_argument("--quiet", action="store_true", help="Less verbose output")
-    args = parser.parse_args()
-
-    device = set_device(args.device)
-    methods = [args.method]
-    if args.method == "all":
-        methods = ["brent", "secant", "fixed", "newton"]
-
-    for k in range(args.cases):
-        for mth in methods:
-            run_one(
-                method=mth,
-                m=args.m,
-                n=args.n,
-                device=device,
-                seed=args.seed + k,
-                msign_steps=args.msign_steps,
-                tol=args.tol,
-                max_iter=args.max_iters,
-                rank1_theta=args.rank1_theta,
-                verbose=not args.quiet,
-                compare_ref_phi=True,
-            )
+    print(f"[{result.method}] λ* = {result.solution:.10f}")
+    print(f"  |f(λ*)| = {result.residual:.3e} (target ≤ {tol})")
+    print(f"  Iterations: {result.iterations}, Function evals: {result.function_evaluations}")
+    print(f"  Converged: {result.converged}, Time: {result.time_sec * 1000:.2f} ms")
+    print(f"  Polar error at λ*: {rel_err_sol:.3e}")
 
 
 if __name__ == "__main__":
-    main()
+    run_solver_demo(method="brent")
