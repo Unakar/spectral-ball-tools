@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
-from msign import msign  # Use your high-precision / efficient Polar Express msign implementation
+from kernels.msign import msign  # Use your high-precision / efficient Polar Express msign implementation
 
 
 # -----------------------------------------------------------------------------
@@ -34,8 +34,8 @@ def trace_fp32(a: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def compute_top_singular_vectors(
     W: torch.Tensor,
-    iters: int = 30,
-    tol: float = 1e-6,
+    iters: int = 3,
+    tol: float = 1e-5,
 ) -> Tuple[torch.Tensor, torch.Tensor, float]:
     """
     Returns (u1, v1, sigma_est). All computation is on GPU.
@@ -96,7 +96,7 @@ def solve_lambda_fixed_point(
     G: torch.Tensor,
     Theta: torch.Tensor,
     tol_abs_constraint: float = 1e-5,
-    max_iterations: int = 1000,
+    max_iterations: int = 10,
     msign_steps: int = 5,
     verbose: bool = False,
 ) -> Tuple[float, torch.Tensor, List[LambdaIterLog]]:
@@ -157,7 +157,7 @@ def solve_lambda_fixed_point(
             )
         )
 
-        if verbose and (k % 50 == 0 or (constraint_abs < tol_abs_constraint and rel_lambda_change < tol_abs_constraint)):
+        if verbose and (k % 1 == 0 or (constraint_abs < tol_abs_constraint and rel_lambda_change < tol_abs_constraint)):
             print(
                 f"[λ {k:4d}] |tr(ΘᵀΦ)|={float(constraint_abs.item()):.3e}  "
                 f"Δλ/|λ|={float(rel_lambda_change.item()):.3e}  "
@@ -184,12 +184,12 @@ def solve_lambda_fixed_point(
 # -----------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=100, help="Number of rows (n >= m)")
-    parser.add_argument("--m", type=int, default=50,  help="Number of columns")
+    parser.add_argument("--n", type=int, default=128, help="Number of rows (n >= m)")
+    parser.add_argument("--m", type=int, default=256,  help="Number of columns")
     parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance for |tr(Θ^T Φ)| and relative λ change")
-    parser.add_argument("--max_iter", type=int, default=1000, help="Maximum iterations for λ fixed-point solver")
+    parser.add_argument("--max_iter", type=int, default=10, help="Maximum iterations for λ fixed-point solver")
     parser.add_argument("--msign_steps", type=int, default=5, help="Number of steps in msign (Polar Express)")
-    parser.add_argument("--power_iters", type=int, default=30, help="Number of power iterations to compute u1, v1")
+    parser.add_argument("--power_iters", type=int, default=3, help="Number of power iterations to compute u1, v1")
     parser.add_argument("--verbose", action="store_true", help="Print iteration logs")
     args = parser.parse_args()
 
