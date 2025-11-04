@@ -13,14 +13,21 @@ from kernels.dmsign import dmsign
 from .base import (
     SolverResult,
     inner_product,
-    evaluate_objective_and_stats,
+    compute_f,
 )
 
-# -----------------------------------------------------------------------------
-# Newton's method:
-#   Prefer analytic VJP/Jacobian if available; otherwise fall back to FD.
-#   We solve f(λ)=<Θ, Φ(λ)>=0 with Φ(λ)=msign(G+λΘ).
-# -----------------------------------------------------------------------------
+"""
+Newton 法：求解 f(λ)=⟨Θ, Φ(λ)⟩=0，Φ(λ)=msign(G+λΘ)。
+
+导数：
+  优先使用 dmsign 的解析 VJP：f'(λ)=⟨Θ, dΦ/dA[Θ]⟩，其中 A=G+λΘ；
+  若不可用，则回退中心差分近似。
+
+收敛判据（仅函数值）：
+  - 仅当 |f(λ)| ≤ tolerance_f 判定收敛；否则达到迭代上限视为未收敛。
+
+统计：仅统计迭代步数 iterations；不统计函数评估次数。
+"""
 @torch.no_grad()
 def solve_with_newton(
     G: torch.Tensor,
@@ -35,32 +42,27 @@ def solve_with_newton(
 ) -> SolverResult:
     start = time.perf_counter()
     lambda_value = initial_guess
-    f, Phi = evaluate_objective_and_stats(G, Theta, lambda_value, msign_steps)[:2]
-    f_evals = 1
+    f = compute_f(G, Theta, lambda_value, msign_steps)
 
     history: Dict[str, Any] = {"solution": [lambda_value], "residual": [f]}
 
     for it in range(1, max_iterations + 1):
         if abs(f) <= tolerance_f:
-            return SolverResult("newton", lambda_value, abs(f), it, True, time.perf_counter() - start, f_evals, history=history)
+            return SolverResult("newton", lambda_value, abs(f), it, True, time.perf_counter() - start, history=history)
 
         df_dlambda = None
-        if not use_numeric_derivative and (dmsign_vjp is not None or dmsign is not None):
+        if not use_numeric_derivative and (dmsign is not None):
             Z = G + torch.tensor(lambda_value, device=G.device, dtype=torch.float32) * Theta
-            if dmsign_vjp is not None:
-                # VJP path: d<f(λ)>/dλ = <Θ, dΦ/dA[Θ]>
-                dA = dmsign_vjp(Z, Theta, msign_fn=msign)
-                df_dlambda = float(inner_product(dA, Theta).item())
-            elif dmsign is not None:
-                dPhi = dmsign(Z, Theta, msign_fn=msign)
-                df_dlambda = float(inner_product(Theta, dPhi).item())
+            # Analytic derivative via VJP of msign:
+            # df/dλ = <Θ, dΦ/dA[Θ]> with A = G + λΘ
+            dA = dmsign(Z, Theta, msign_fn=msign)
+            df_dlambda = float(inner_product(dA, Theta).item())
 
         # FD fallback
         if df_dlambda is None or not math.isfinite(df_dlambda) or df_dlambda == 0.0:
             h = finite_diff_eps * max(1.0, abs(lambda_value))
-            f_plus, *_  = evaluate_objective_and_stats(G, Theta, lambda_value + h, msign_steps)
-            f_minus, *_ = evaluate_objective_and_stats(G, Theta, lambda_value - h, msign_steps)
-            f_evals += 2
+            f_plus  = compute_f(G, Theta, lambda_value + h, msign_steps)
+            f_minus = compute_f(G, Theta, lambda_value - h, msign_steps)
             df_dlambda = (f_plus - f_minus) / (2.0 * h)
             use_numeric_derivative = True
 
@@ -70,18 +72,11 @@ def solve_with_newton(
         step = f / df_dlambda
         next_lambda = lambda_value - step
 
-        if abs(next_lambda - lambda_value) <= tolerance_x * max(1.0, abs(lambda_value)):
-            lambda_value = next_lambda
-            f, *_ = evaluate_objective_and_stats(G, Theta, lambda_value, msign_steps)
-            f_evals += 1
-            history["solution"].append(lambda_value)
-            history["residual"].append(f)
-            return SolverResult("newton", lambda_value, abs(f), it, True, time.perf_counter() - start, f_evals, history=history)
+        # 不使用 |Δλ| 的早停，继续迭代直到 |f| 达标或达到上限
 
         lambda_value = next_lambda
-        f, *_ = evaluate_objective_and_stats(G, Theta, lambda_value, msign_steps)
-        f_evals += 1
+        f = compute_f(G, Theta, lambda_value, msign_steps)
         history["solution"].append(lambda_value)
         history["residual"].append(f)
 
-    return SolverResult("newton", lambda_value, abs(f), max_iterations, False, time.perf_counter() - start, f_evals, history=history)
+    return SolverResult("newton", lambda_value, abs(f), max_iterations, False, time.perf_counter() - start, history=history)

@@ -46,12 +46,9 @@ parse_file () {
   local abs_constraint=$(grep -E '\|tr\(Θ' "$f" | tail -n1 | sed -E 's/.*\|tr.*: *([0-9.eE+-]+).*/\1/')
 
   # iters / fevals
-  local iters=$(grep -E 'iters/evals' "$f" | tail -n1 | sed -E 's/.*: ([0-9]+) iters, .*/\1/')
+  # Prefer new unified pattern 'iters       : N iters'; fallback to legacy 'iters/evals'
+  local iters=$(grep -E 'iters\s*:' "$f" | tail -n1 | sed -E 's/.*iters *: *([0-9]+).*/\1/')
   local fevals=$(grep -E 'iters/evals' "$f" | tail -n1 | sed -E 's/.*, ([0-9]+) f-evals.*/\1/')
-  if [[ -z "$iters" ]]; then
-    # fixed_point prints "iters :" line
-    iters=$(grep -E 'iters *:' "$f" | tail -n1 | sed -E 's/.*iters *: *([0-9]+).*/\1/')
-  fi
 
   # time (ms)
   local time_ms=$(grep -E 'time *:' "$f" | tail -n1 | sed -E 's/.*time *: *([0-9.]+) ms.*/\1/')

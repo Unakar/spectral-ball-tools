@@ -24,60 +24,41 @@ def trace_fp32(a: torch.Tensor) -> torch.Tensor:
     return torch.trace(a.to(torch.float32))
 
 
+## NOTE: 彻底移除在 base 中的奇异向量求解，转移到 kernels/power_iteration.py
+
+
 # -----------------------------------------------------------------------------
-# Top singular vectors via bilateral power iteration (SVD-free, GPU-friendly)
-# Iteration:
-#   1) u ← normalize(W v)
-#   2) v ← normalize(W^T u)
-# Rayleigh quotient approximates σ_max:  σ ≈ u^T (W v)
+# Objective helpers (decoupled, solver-agnostic)
+#   - compute_phi(G, Θ, λ): Φ(λ) = msign(G + λΘ)
+#   - compute_f(G, Θ, λ): f(λ) = <Θ, Φ(λ)>
+#   Legacy convenience evaluate_objective_and_stats kept for compatibility.
 # -----------------------------------------------------------------------------
 @torch.no_grad()
-def compute_top_singular_vectors(
-    W: torch.Tensor,
-    iters: int = 3,
-    tol: float = 1e-5,
-) -> Tuple[torch.Tensor, torch.Tensor, float]:
-    """
-    Returns (u1, v1, sigma_est). All computation stays on GPU.
-    Normalization is done in FP32; only GEMV/GEMM are used.
-    """
-    assert W.is_cuda, "Expect CUDA tensors."
-    n, m = W.shape
-
-    v = torch.randn(m, device=W.device, dtype=torch.float32)
-    v = v / (v.norm() + 1e-20)
-
-    sigma_prev = 0.0
-    for _ in range(iters):
-        u = W @ v
-        u_norm = u.norm()
-        if u_norm < 1e-30:
-            u.zero_(); v.zero_()
-            return u, v, 0.0
-        u = u / u_norm
-
-        v = W.mT @ u
-        v_norm = v.norm()
-        if v_norm < 1e-30:
-            u.zero_(); v.zero_()
-            return u, v, 0.0
-        v = v / v_norm
-
-        sigma = torch.dot(u, W @ v).item()
-        if abs(sigma - sigma_prev) < tol * max(1.0, abs(sigma_prev)):
-            break
-        sigma_prev = sigma
-
-    return u, v, float(sigma_prev)
+def compute_phi(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    lambda_value: float,
+    msign_steps: int = 5,
+) -> torch.Tensor:
+    """Compute Φ(λ) = msign(G + λΘ) on GPU (no SVD)."""
+    device = G.device
+    lambda_tensor = torch.tensor(lambda_value, device=device, dtype=torch.float32)
+    Z = G + lambda_tensor * Theta
+    return msign(Z, steps=msign_steps)
 
 
-# -----------------------------------------------------------------------------
-# Unified objective evaluation:
-#   f(λ) = <Θ, Φ(λ)>, where Φ(λ) = msign(G + λΘ)
-#   Returns (f, Φ, X, q), where:
-#     X = Θ^T Φ
-#     q = (G + λΘ)^T Φ  == (Z^T Z)^{1/2}  (avoids explicit matrix sqrt/inv)
-# -----------------------------------------------------------------------------
+@torch.no_grad()
+def compute_f(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    lambda_value: float,
+    msign_steps: int = 5,
+) -> float:
+    """Compute scalar f(λ) = <Θ, Φ(λ)> with Φ(λ)=msign(G+λΘ)."""
+    Phi = compute_phi(G, Theta, lambda_value, msign_steps)
+    return float(inner_product(Theta, Phi).item())
+
+
 @torch.no_grad()
 def evaluate_objective_and_stats(
     G: torch.Tensor,
@@ -85,6 +66,9 @@ def evaluate_objective_and_stats(
     lambda_value: float,
     msign_steps: int = 5,
 ) -> Tuple[float, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Legacy helper retained for compatibility.
+    Returns (f, Φ, X=ΘᵀΦ, q=ZᵀΦ) where Z=G+λΘ.
+    """
     device = G.device
     lambda_tensor = torch.tensor(lambda_value, device=device, dtype=torch.float32)
     Z = G + lambda_tensor * Theta
@@ -95,53 +79,31 @@ def evaluate_objective_and_stats(
     return f_val, Phi, X, q
 
 
-# -----------------------------------------------------------------------------
-# Fixed-point step size (SVD-free):
-#   c = ||Z||_* / (m * ||Θ||_F^2), and  ||Z||_* = tr((Z^T Z)^{1/2}) = tr(q)
-# -----------------------------------------------------------------------------
-@torch.no_grad()
-def compute_step_size_via_q(
-    Z: torch.Tensor,
-    Theta: torch.Tensor,
-    Phi: torch.Tensor,
-) -> float:
-    m = Z.shape[1]
-    trace_q = float(trace_fp32(Z.mT @ Phi).item())
-    theta_fro_sq = float(inner_product(Theta, Theta).item())
-    denom = max(1e-12, m * theta_fro_sq)
-    return trace_q / denom
-
 
 # -----------------------------------------------------------------------------
 # Standard result record
 # -----------------------------------------------------------------------------
 @dataclass
 class SolverResult:
+    """统一的求解结果结构。
+
+    - method: 求解器名称（'brent'/'bisection'/'secant'/'fixed_point'/'newton'）。
+    - solution: 最终 λ。
+    - residual: 最终 |f(λ)|。
+    - iterations: 迭代步数（唯一关注的计数指标）。
+    - converged: 是否满足收敛判据（各 solver 中定义）。
+    - time_sec: 求解耗时（秒）。
+    - bracket: 可选，括号区间 (lo, hi)。
+    - history: 可选，包含 'solution' 与 'residual' 的轨迹。
+    """
     method: str
     solution: float
     residual: float
     iterations: int
     converged: bool
     time_sec: float = 0.0
-    function_evaluations: int = 0
     bracket: tuple[float, float] | None = None
     history: Dict[str, Any] | None = None
 
 
-# -----------------------------------------------------------------------------
-# Random test matrices (GPU-only)
-# Θ is constructed from top singular vectors of a random W for realism
-# -----------------------------------------------------------------------------
-@torch.no_grad()
-def generate_test_matrices(rows: int, cols: int, seed: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert torch.cuda.is_available(), "CUDA not available; GPU is required."
-    device = torch.device("cuda")
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    W = torch.randn(rows, cols, device=device, dtype=torch.float32) / math.sqrt(cols)
-    G = torch.randn(rows, cols, device=device, dtype=torch.float32) / math.sqrt(cols)
-    u1, v1, _ = compute_top_singular_vectors(W, iters=3, tol=1e-6)
-    Theta = torch.outer(u1, v1)  # Θ = u1 v1^T (gradient of spectral norm at W)
-    return G, Theta
+## NOTE: 移除 generate_test_matrices，避免与 root_solver 的数据构造重复

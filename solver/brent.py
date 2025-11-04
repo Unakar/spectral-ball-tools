@@ -6,8 +6,21 @@ import time
 from typing import Tuple
 
 import torch
-from .base import SolverResult, evaluate_objective_and_stats
+from .base import SolverResult, compute_f
 
+
+"""
+Brent 法：求解 f(λ)=⟨Θ, Φ(λ)⟩=0，其中 Φ(λ)=msign(G+λΘ)。
+
+前提与流程：
+  - 需已找到括号区间 [a,b] 使 f(a)·f(b)≤0（见 find_bracket）。
+  - 迭代融合二分、割线、逆二次插值，保持稳健与效率。
+
+收敛判据（仅函数值）：
+  - 仅当 |f(λ)| ≤ tolerance_f 判定收敛；否则达到迭代上限视为未收敛。
+
+统计：只统计迭代步 iterations；不再统计函数评估次数。
+"""
 
 # -----------------------------------------------------------------------------
 # Bracketing: find [a, b] such that f(a) * f(b) <= 0
@@ -20,12 +33,10 @@ def find_bracket(
     initial_step: float = 1.0,
     max_expansions: int = 60,
     msign_steps: int = 5,
-) -> Tuple[float, float, float, float, int]:
-    f_evals = 0
-    fa, *_ = evaluate_objective_and_stats(G, Theta, initial_guess, msign_steps)
-    f_evals += 1
+) -> Tuple[float, float, float, float]:
+    fa = compute_f(G, Theta, initial_guess, msign_steps)
     if fa == 0.0:
-        return initial_guess, initial_guess, fa, fa, f_evals
+        return initial_guess, initial_guess, fa, fa
 
     step = initial_step if initial_step > 0 else 1.0
     a = b = initial_guess
@@ -34,21 +45,19 @@ def find_bracket(
     for _ in range(max_expansions):
         # try right
         b = initial_guess + step
-        fb, *_ = evaluate_objective_and_stats(G, Theta, b, msign_steps)
-        f_evals += 1
+        fb = compute_f(G, Theta, b, msign_steps)
         if fa * fb <= 0:
-            return (a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals)
+            return (a, b, fa, fb) if a <= b else (b, a, fb, fa)
 
         # try left
         a = initial_guess - step
-        fa, *_ = evaluate_objective_and_stats(G, Theta, a, msign_steps)
-        f_evals += 1
+        fa = compute_f(G, Theta, a, msign_steps)
         if fa * fb <= 0:
-            return (a, b, fa, fb, f_evals) if a <= b else (b, a, fb, fa, f_evals)
+            return (a, b, fa, fb) if a <= b else (b, a, fb, fa)
 
         step *= 2.0
 
-    return min(a, b), max(a, b), fa, fb, f_evals
+    return min(a, b), max(a, b), fa, fb
 
 
 # -----------------------------------------------------------------------------
@@ -68,12 +77,11 @@ def solve_with_brent(
     msign_steps: int = 5,
 ) -> SolverResult:
     start = time.perf_counter()
-    f_evals = 0
 
     if fa == 0.0:
-        return SolverResult("brent", a, 0.0, 0, True, 0.0, f_evals, (a, b))
+        return SolverResult("brent", a, 0.0, 0, True, 0.0, (a, b))
     if fb == 0.0:
-        return SolverResult("brent", b, 0.0, 0, True, 0.0, f_evals, (a, b))
+        return SolverResult("brent", b, 0.0, 0, True, 0.0, (a, b))
 
     c, fc = a, fa
     d = e = b - a
@@ -81,7 +89,7 @@ def solve_with_brent(
 
     for it in range(1, max_iterations + 1):
         if fx == 0.0:
-            return SolverResult("brent", x, 0.0, it, True, time.perf_counter() - start, f_evals, (a, b))
+            return SolverResult("brent", x, 0.0, it, True, time.perf_counter() - start, (a, b))
         if fa * fb > 0:
             a, fa = c, fc
             d = e = b - a
@@ -90,8 +98,9 @@ def solve_with_brent(
 
         tol = 2.0 * tolerance_x * max(1.0, abs(b))
         m = 0.5 * (c - b)
-        if abs(m) <= tol or abs(fb) <= tolerance_f:
-            return SolverResult("brent", b, abs(fb), it, True, time.perf_counter() - start, f_evals, (a, b))
+
+        if abs(fb) <= tolerance_f:
+            return SolverResult("brent", b, abs(fb), it, True, time.perf_counter() - start, (a, b))
 
         if abs(e) >= tol and abs(fc) > abs(fb):
             s = fb / fc
@@ -119,7 +128,6 @@ def solve_with_brent(
         else:
             b += tol if m > 0 else -tol
 
-        fb, *_ = evaluate_objective_and_stats(G, Theta, b, msign_steps)
-        f_evals += 1
+        fb = compute_f(G, Theta, b, msign_steps)
 
-    return SolverResult("brent", b, abs(fb), max_iterations, False, time.perf_counter() - start, f_evals, (a, b))
+    return SolverResult("brent", b, abs(fb), max_iterations, False, time.perf_counter() - start, (a, b))
