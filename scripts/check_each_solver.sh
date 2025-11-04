@@ -13,7 +13,7 @@ TOL=${TOL:-1e-8}
 MAX_ITER=${MAX_ITER:-100}
 MSIGN_STEPS=${MSIGN_STEPS:-5}
 
-METHODS=("brent" "secant" "fixed_point" "newton")
+METHODS=("brent" "bisection" "secant" "fixed_point" "newton")
 
 for METHOD in "${METHODS[@]}"; do
   LOG="logs/${METHOD}_n${N}_m${M}_s${SEED}_$(date +%Y%m%d_%H%M%S).log"

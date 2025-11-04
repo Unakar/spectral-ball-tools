@@ -7,7 +7,7 @@ set -euo pipefail
 mkdir -p logs results
 
 SIZES=(${SIZES:-"64x32" "128x64" "256x128" "512x256"})
-METHODS=(${METHODS:-"brent" "secant" "fixed_point" "newton"})
+METHODS=(${METHODS:-"brent" "bisection" "secant" "fixed_point" "newton"})
 SEED=${SEED:-42}
 TOL=${TOL:-1e-8}
 MAX_ITER=${MAX_ITER:-100}

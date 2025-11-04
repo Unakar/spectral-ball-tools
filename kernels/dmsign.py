@@ -1,6 +1,6 @@
 import torch
 from typing import Optional, Callable
-from msign import msign  # 导入已实现的高效矩阵符号函数
+from kernels.msign import msign  # 导入已实现的高效矩阵符号函数
 
  # See https://kexue.fm/archives/11025
 

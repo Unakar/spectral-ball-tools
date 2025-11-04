@@ -13,6 +13,7 @@ from solver.brent import find_bracket, solve_with_brent
 from solver.secant import solve_with_secant
 from solver.newton import solve_with_newton
 from solver.fix_point import solve_lambda_fixed_point  
+from solver.bisection import solve_with_bisection
 
 
 @torch.no_grad()
@@ -35,6 +36,19 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
         else:
             result = solve_with_brent(G, Theta, a, b, fa, fb,
                                       tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
+            result.function_evaluations += f_evals
+
+    elif method == "bisection":
+        a, b, fa, fb, f_evals = find_bracket(G, Theta, msign_steps=msign_steps)
+        if fa * fb > 0:
+            print("[warn] could not bracket a root; fallback to secant.")
+            result = solve_with_secant(G, Theta, a, b,
+                                       tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
+            result.function_evaluations += f_evals
+            result.bracket = (a, b)
+        else:
+            result = solve_with_bisection(G, Theta, a, b, fa, fb,
+                                          tolerance_f=tol, max_iterations=max_iter, msign_steps=msign_steps)
             result.function_evaluations += f_evals
 
     elif method == "secant":
@@ -87,7 +101,7 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, default="brent",
-                        choices=["brent", "secant", "fixed_point", "newton"])
+                        choices=["brent", "bisection", "secant", "fixed_point", "newton"])
     parser.add_argument("--n", type=int, default=128)
     parser.add_argument("--m", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)

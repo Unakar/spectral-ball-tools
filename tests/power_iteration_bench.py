@@ -58,6 +58,7 @@ def optimized_pi(w: torch.Tensor, steps: int = 10, eps: float = 1e-20):
     return s, u, v
 
 
+
 @torch.no_grad()
 def top_svd(W: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     W = W.float()
@@ -177,4 +178,4 @@ def benchmark(
 # -----------------------------
 if __name__ == "__main__":
     sizes = [128, 256, 1024]
-    benchmark(sizes=sizes, trials=20, pi_steps=100, add_shift=0.1, seed=0)
+    benchmark(sizes=sizes, trials=30, pi_steps=150, add_shift=1.0, seed=0)
