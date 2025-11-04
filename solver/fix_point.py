@@ -39,8 +39,8 @@ def solve_with_fixed_point(
     assert G.is_cuda and Theta.is_cuda, "Expected CUDA tensors."
     n, m = G.shape
 
-    tr_Th_Th = trace_fp32(Theta.mT @ Theta)  # tr(ΘᵀΘ)
-    tr_Th_G  = trace_fp32(Theta.mT @ G)      # tr(ΘᵀG)
+    tr_Th_Th = inner_product(Theta, Theta)  # tr(ΘᵀΘ)
+    tr_Th_G  = inner_product(Theta, G)      # tr(ΘᵀG)
 
     # Initialize λ = - tr(ΘᵀG) / tr(ΘᵀΘ)
     lam = -tr_Th_G / (tr_Th_Th + 1e-30)
@@ -55,7 +55,7 @@ def solve_with_fixed_point(
 
         tr_X  = trace_fp32(X)
         tr_q  = trace_fp32(q)
-        tr_Xq = trace_fp32(X @ q)
+        tr_Xq = inner_product(X, q) # tr(Xᵀq)
         f_val = tr_X
         f_abs = float(f_val.abs().item())
         history["solution"].append(float(lam.item()))
