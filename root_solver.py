@@ -85,8 +85,6 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
 
     # Unified epilogue
     f_star = compute_f(G, Theta, result.solution, msign_steps)
-    Phi_star = compute_phi(G, Theta, result.solution, msign_steps)
-    ortho_err_star = (Phi_star.mT @ Phi_star - torch.eye(m, device=G.device)).norm().item() / (m + 1e-12)
 
     print(f"\n[{result.method}]  λ* = {result.solution:.10f}")
     print(f"  |f(λ*)|     : {abs(f_star):.3e}  (target ≤ {tol})")
@@ -95,7 +93,6 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
     print(f"  time        : {result.time_sec*1000:.2f} ms")
     if result.bracket is not None:
         print(f"  bracket     : [{result.bracket[0]:.4g}, {result.bracket[1]:.4g}]")
-    print(f"  orthogonality error @λ*: {ortho_err_star:.3e}")
 
 
 def main():

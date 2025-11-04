@@ -43,7 +43,7 @@ def solve_with_fixed_point(
     tr_Th_G  = inner_product(Theta, G)      # tr(ΘᵀG)
 
     # Initialize λ = - tr(ΘᵀG) / tr(ΘᵀΘ)
-    lam = -tr_Th_G / (tr_Th_Th + 1e-30)
+    lam = -tr_Th_G / (tr_Th_Th + + 1e-30)
 
     history: Dict[str, Any] = {"solution": [], "residual": []}
 
