@@ -43,7 +43,6 @@ def solve_with_newton(
     lambda_value = initial_guess
     f = compute_f(G, Theta, lambda_value, msign_steps)
 
-    history: Dict[str, Any] = {"solution": [lambda_value], "residual": [f]}
 
     for it in range(1, max_iterations + 1):
         if abs(f) <= tolerance_f:
@@ -74,7 +73,5 @@ def solve_with_newton(
 
         lambda_value = next_lambda
         f = compute_f(G, Theta, lambda_value, msign_steps)
-        history["solution"].append(lambda_value)
-        history["residual"].append(f)
 
-    return SolverResult("newton", lambda_value, abs(f), max_iterations, False, time.perf_counter() - start, history=history)
+    return SolverResult("newton", lambda_value, abs(f), max_iterations, False, time.perf_counter() - start)

@@ -54,18 +54,15 @@ def solve_with_bisection(
         if fb <= 0.0 <= fa:
             a, b, fa, fb = b, a, fb, fa
 
-    history: Dict[str, Any] = {"solution": [], "residual": []}
 
     x = 0.5 * (a + b)
     fx = compute_f(G, Theta, x, msign_steps)
-    history["solution"].append(x)
-    history["residual"].append(fx)
 
     for it in range(1, max_iterations + 1):
         # Termination: function tolerance or interval tolerance
         # Interval tolerance scales with |x| to be consistent with others
         if abs(fx) <= tolerance_f:
-            return SolverResult("bisection", x, abs(fx), it, True, time.perf_counter() - start, (a, b), history)
+            return SolverResult("bisection", x, abs(fx), it, True, time.perf_counter() - start, (a, b))
 
 
         # Decide which subinterval keeps the root, maintaining fa ≤ 0 ≤ fb
@@ -76,8 +73,6 @@ def solve_with_bisection(
 
         x = 0.5 * (a + b)
         fx = compute_f(G, Theta, x, msign_steps)
-        history["solution"].append(x)
-        history["residual"].append(fx)
 
     # Max iterations reached
-    return SolverResult("bisection", x, abs(fx), max_iterations, False, time.perf_counter() - start, (a, b), history)
+    return SolverResult("bisection", x, abs(fx), max_iterations, False, time.perf_counter() - start, (a, b))

@@ -103,7 +103,5 @@ class SolverResult:
     converged: bool
     time_sec: float = 0.0
     bracket: tuple[float, float] | None = None
-    history: Dict[str, Any] | None = None
 
 
-## NOTE: 移除 generate_test_matrices，避免与 root_solver 的数据构造重复

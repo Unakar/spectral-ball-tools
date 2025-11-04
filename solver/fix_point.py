@@ -45,7 +45,6 @@ def solve_with_fixed_point(
     # Initialize λ = - tr(ΘᵀG) / tr(ΘᵀΘ)
     lam = -tr_Th_G / (tr_Th_Th + 1e-30)
 
-    history: Dict[str, Any] = {"solution": [], "residual": []}
 
     for it in range(1, max_iterations + 1):
         Z = G + lam * Theta
@@ -56,14 +55,10 @@ def solve_with_fixed_point(
         tr_X  = trace_fp32(X)
         tr_q  = trace_fp32(q)
         tr_Xq = inner_product(X, q) # tr(Xᵀq)
-        f_val = tr_X
-        f_abs = float(f_val.abs().item())
-        history["solution"].append(float(lam.item()))
-        history["residual"].append(float(f_abs))
+        f_abs = float(tr_X.abs().item())
 
         if f_abs <= tolerance_f:
-            return SolverResult("fixed_point", float(lam.item()), f_abs, it, True,
-                                time.perf_counter() - start, history=history)
+            return SolverResult("fixed_point", float(lam.item()), f_abs, it, True, time.perf_counter() - start)
 
         # Fixed-point update
         numerator = tr_Xq - tr_X * tr_q / m - tr_Th_G
@@ -71,4 +66,4 @@ def solve_with_fixed_point(
 
     # Max iterations reached
     return SolverResult("fixed_point", float(lam.item()), f_abs, max_iterations, False,
-                        time.perf_counter() - start, history=history)
+                        time.perf_counter() - start)
