@@ -27,8 +27,8 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    W = torch.randn(n, m, device=device, dtype=torch.float32) / (m ** 0.5)
-    G = torch.randn(n, m, device=device, dtype=torch.float32) / (m ** 0.5)
+    W = torch.randn(n, m, device=device, dtype=torch.float32) 
+    G = torch.randn(n, m, device=device, dtype=torch.float32) 
 
     if theta_source == "power":
         _, u, v = power_iteration(W, steps=power_iters)
@@ -40,10 +40,6 @@ def run_solver_demo(method: str, n: int, m: int, seed: int, tol: float, max_iter
         raise ValueError(f"Unknown theta_source: {theta_source}")
 
     print(f"=== Solve  ⟨Θ, msign(G + λΘ)⟩ = 0  ===  \n (n={n}, m={m}, method={method})")
-    f0 = compute_f(G, Theta, 0.0, msign_steps)
-    Phi0 = compute_phi(G, Theta, 0.0, msign_steps)
-    ortho_err0 = (Phi0.mT @ Phi0 - torch.eye(m, device=G.device)).norm().item() / (m + 1e-12)
-    print(f"f(0)={f0:.6e}  |  orthogonality error @λ=0: {ortho_err0:.3e}")
 
     if method == "brent":
         a, b, fa, fb = find_bracket(G, Theta, msign_steps=msign_steps)
@@ -107,7 +103,7 @@ def main():
     parser.add_argument("--method", type=str, default="brent",
                         choices=["brent", "bisection", "secant", "fixed_point", "newton"])
     parser.add_argument("--n", type=int, default=128)
-    parser.add_argument("--m", type=int, default=256)
+    parser.add_argument("--m", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tol", type=float, default=1e-5)
     parser.add_argument("--max_iter", type=int, default=50)
