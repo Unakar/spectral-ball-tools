@@ -32,7 +32,6 @@ def solve_with_fixed_point(
     G: torch.Tensor,
     Theta: torch.Tensor,
     tolerance_f: float = 1e-6,
-    tolerance_x: float = 1e-8,
     max_iterations: int = 50,
     msign_steps: int = 5,
 ) -> SolverResult:
@@ -45,7 +44,6 @@ def solve_with_fixed_point(
 
     # Initialize λ = - tr(ΘᵀG) / tr(ΘᵀΘ)
     lam = -tr_Th_G / (tr_Th_Th + 1e-30)
-    prev_lam = None
 
     history: Dict[str, Any] = {"solution": [], "residual": []}
 
@@ -69,7 +67,6 @@ def solve_with_fixed_point(
 
         # Fixed-point update
         numerator = tr_Xq - tr_X * tr_q / m - tr_Th_G
-        prev_lam = lam
         lam = numerator / (tr_Th_Th + 1e-30)
 
     # Max iterations reached

@@ -30,7 +30,6 @@ def solve_with_bisection(
     fa: float,
     fb: float,
     tolerance_f: float = 1e-8,
-    tolerance_x: float = 1e-10,
     max_iterations: int = 100,
     msign_steps: int = 5,
 ) -> SolverResult:

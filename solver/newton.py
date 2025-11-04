@@ -34,7 +34,6 @@ def solve_with_newton(
     Theta: torch.Tensor,
     initial_guess: float = 0.0,
     tolerance_f: float = 1e-10,
-    tolerance_x: float = 1e-10,
     max_iterations: int = 50,
     msign_steps: int = 5,
     use_numeric_derivative: bool = False,
