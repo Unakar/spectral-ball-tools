@@ -12,7 +12,8 @@ mkdir -p "$(dirname "${OUT_CSV}")"
 TMP_CSV=$(mktemp)
 
 # CSV header
-echo "file,method,n,m,seed,tol,max_iter,msign_steps,lambda,abs_f,abs_constraint,iters,fevals,time_ms,ortho_err,bracket_lo,bracket_hi" > "${TMP_CSV}"
+HEADER="file,method,n,m,seed,tol,max_iter,msign_steps,lambda,abs_f,abs_constraint,iters,fevals,time_ms,ortho_err,bracket_lo,bracket_hi"
+echo "${HEADER}" > "${TMP_CSV}"
 
 parse_file () {
   local f="$1"
@@ -88,3 +89,39 @@ done
 
 mv "${TMP_CSV}" "${OUT_CSV}"
 echo "[parse] parsed $(wc -l < "${OUT_CSV}") rows (incl. header) -> ${OUT_CSV}"
+
+# Optional averaging across repeats (group by method,n,m,tol,max_iter,msign_steps)
+if [[ "${AVERAGE:-0}" == "1" ]]; then
+  TMP_RAW="${OUT_CSV}"
+  TMP_AVG=$(mktemp)
+  echo "${HEADER}" > "${TMP_AVG}"
+  awk -F',' 'NR==1{next}
+  function isnum(x){return (x ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/)}
+  {
+    key=$2","$3","$4","$6","$7","$8
+    k[key]=key
+    c[key]+=1
+    if(isnum($9))  s1[key]+=$9
+    if(isnum($10)) s2[key]+=$10
+    if(isnum($11)) s3[key]+=$11
+    if(isnum($12)) s4[key]+=$12
+    if(isnum($14)) s5[key]+=$14
+    if(isnum($15)) s6[key]+=$15
+  }
+  END{
+    for (key in k){
+      split(key, a, ",");
+      method=a[1]; n=a[2]; m=a[3]; tol=a[4]; maxit=a[5]; ms=a[6];
+      cnt=c[key]
+      lambda=(cnt?s1[key]/cnt:"-")
+      absf=(cnt?s2[key]/cnt:"-")
+      absc=(cnt?s3[key]/cnt:"-")
+      iters=(cnt?s4[key]/cnt:"-")
+      timems=(cnt?s5[key]/cnt:"-")
+      ortho=(cnt?s6[key]/cnt:"-")
+      printf("group-%s-%sx%s, %s, %s, %s, avg, %s, %s, %s, %s, %s, -, %s, %s, -, -\n", method, n, m, method, n, m, ms, lambda, absf, absc, iters, timems, ortho) >> "'${TMP_AVG}'"
+    }
+  }' "${TMP_RAW}"
+  mv "${TMP_AVG}" "${OUT_CSV}"
+  echo "[avg] grouped averages -> ${OUT_CSV}"
+fi

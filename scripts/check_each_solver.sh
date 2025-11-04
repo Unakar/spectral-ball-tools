@@ -6,14 +6,14 @@ set -euo pipefail
 
 mkdir -p logs
 
-N=${N:-128}
-M=${M:-256}
+N=${N:-4096}
+M=${M:-128}
 SEED=${SEED:-42}
-TOL=${TOL:-1e-8}
+TOL=${TOL:-1e-4}
 MAX_ITER=${MAX_ITER:-100}
-MSIGN_STEPS=${MSIGN_STEPS:-5}
+MSIGN_STEPS=${MSIGN_STEPS:-10}
 THETA_SOURCE=${THETA_SOURCE:-power}
-POWER_ITERS=${POWER_ITERS:-3}
+POWER_ITERS=${POWER_ITERS:-30}
 
 METHODS=("brent" "bisection" "secant" "fixed_point" "newton")
 

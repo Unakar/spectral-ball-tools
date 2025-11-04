@@ -72,7 +72,7 @@ bash scripts/check_each_solver.sh
 # 2) 多尺寸/多方法评测并汇总 CSV（注意文件名是 becnmark_methods.sh）
 SIZES="128x64 256x128" METHODS="bisection brent newton" \
 THETA_SOURCE=power POWER_ITERS=3 TOL=1e-8 MAX_ITER=100 MSIGN_STEPS=5 \
-bash scripts/becnmark_methods.sh
+bash scripts/bechmark_methods.sh
 
 # 3) msign 步数灵敏度
 METHOD=fixed_point N=128 M=256 THETA_SOURCE=power POWER_ITERS=3 \
