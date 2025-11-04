@@ -51,7 +51,6 @@ def solve_with_secant(
             break
 
         x2 = x1 - f1 * (x1 - x0) / denom
-        # 不使用 |Δλ| 的早停，继续迭代直到 |f| 达标或达到上限
 
         x0, f0, x1 = x1, f1, x2
         f1 = compute_f(G, Theta, x1, msign_steps)

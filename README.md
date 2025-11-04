@@ -1,238 +1,141 @@
 # Spectral-Ball λ Solver (GPU)
 
-> **目标**：在谱球面约束（spectral-ball）场景下，快速、稳定地数值求解 `λ`，使  
-> \[
-> f(\lambda) \;=\; \langle \Theta, \Phi(\lambda) \rangle \;=\; 0,
-> \qquad \Phi(\lambda) \;=\; \operatorname{msign}(G + \lambda \Theta).
-> \]  
-> 其中 \( \operatorname{msign}(M) = M (M^\top M)^{-1/2} \) 为**极分解的矩阵符号函数**。
+目标：在谱球面约束（spectral-ball）下求解标量 λ，使
 
-本仓库实现了多种**根求解 / 固定点**算法，且**彻底 GPU 化**（无 SVD 主路径），用于验证 `λ` 的收敛速度、精度与实现效率。
+f(λ) = ⟨Θ, Φ(λ)⟩ = 0，  Φ(λ) = msign(G + λΘ)
+
+其中 msign(M) = M (MᵀM)^{-1/2} 是极分解的矩阵符号函数。本仓库使用 Polar‑Express 的多项式迭代在 GPU 上高效近似该运算（SVD‑free，BF16/FP32 混合精度）。
+
+提供多种一元求根/固定点算法，统一只以 |f(λ)| ≤ tol 作为收敛判据，便于比较不同方法的收敛速度、精度与效率。
 
 ---
 
-## 目录结构
+## 目录
 
 ```
 .
 ├── kernels/
-│   ├── msign.py                 # 高精度/高效 Polar-Express msign 实现（BF16 内核 + 多项式迭代）
-│   └── dmsign.py                # （可选）msign 的导数/VJP 实现（若提供，则 Newton 可用解析梯度）
+│   ├── msign.py               # 高精度/高效 msign（Polar-Express, BF16/FP32）
+│   ├── dmsign.py              # （可选）msign 的 VJP/导数实现（供 Newton 使用）
+│   └── power_iteration.py     # 双边幂迭代 power_iteration；top_svd 基准
 │
 ├── solver/
-│   ├── base.py                # 通用工具：FP32 累加内积/trace、双边幂迭代、统一目标评估等
-│   ├── fix_point.py             # 固定点法 λ 求解（你提供的“完美风格”版本）
-│   ├── brent.py                 # Brent 法（需 bracket）
-│   ├── secant.py                # 割线法（纯函数值）
-│   └── newton.py                # Newton 法（优先解析 VJP，无则用有限差分）
+│   ├── base.py                # compute_f/compute_phi 等通用工具（与方法解耦）
+│   ├── bisection.py           # 纯二分法（需 monotone + bracket）
+│   ├── brent.py               # Brent 法（需 bracket）
+│   ├── secant.py              # 割线法（无导数）
+│   ├── newton.py              # Newton 法（优先解析导数，回退差分）
+│   └── fix_point.py           # 固定点法（显式更新，SVD-free）
 │
-├── root_solver.py               # 统一入口：选择方法，打印可解析日志
-│
-├── scripts/
-│   ├── check_each_solver.sh     # 小规模一键 sanity check（全方法）
-│   ├── benchmark_methods.sh     # 多尺寸/多方法评测，汇总 CSV
-│   ├── sweep_msign_steps.sh     # msign 迭代步数灵敏度评估
-│   └── parse_logs_to_csv.sh     # 解析日志 → CSV
-│
-└── README.md
+├── root_solver.py             # 统一入口：选择方法/Θ构造，输出日志
+└── scripts/
+    ├── check_each_solver.sh   # 小规模一键 sanity check（全方法）
+    ├── becnmark_methods.sh    # 多尺寸/多方法评测，汇总 CSV（文件名有拼写）
+    ├── sweep_msign_steps.sh   # msign 迭代步数灵敏度评估
+    └── parse_logs_to_csv.sh   # 解析日志 → CSV
 ```
 
 ---
 
-## 算法背景：为什么需要迭代法求解 λ？
+## 快速开始
 
-我们考虑谱球面上的 Muon 型优化问题（几何直觉与一阶“切空间”近似来自相关系列文章）：
+单次运行（选择方法 + Θ 构造）：
+- 关键参数：
+  - `--method {brent,bisection,secant,fixed_point,newton}`
+  - `--n N --m M`：矩阵尺寸
+  - `--seed S`：随机种子
+  - `--tol T`：收敛阈值（仅以 |f(λ)| 判断）
+  - `--max_iter K`：最大迭代步数
+  - `--msign_steps S`：msign 迭代步数（越大越准、越慢）
+  - `--theta_source {power,svd}`：Θ 的构造方式（默认 power）
+  - `--power_iters P`：幂迭代步数（用于 `theta_source=power`）
 
-\[
-\max_{\Phi} \;\langle G, \Phi \rangle
-\quad \text{s.t.}\quad
-\|\Phi\|_2 = 1, \;
-\langle \Theta , \Phi \rangle = 0,\qquad
-\Theta = u_1 v_1^\top,
-\]
+示例：
+```
+python -u root_solver.py \
+  --method brent \
+  --n 128 --m 256 \
+  --seed 42 \
+  --tol 1e-8 \
+  --max_iter 100 \
+  --msign_steps 5 \
+  --theta_source power \
+  --power_iters 3
+```
 
-其中 \( \Theta \) 是当前参数 \( W \) 的谱范数梯度（即最大奇异值对应的左右奇异向量外积），可通过**双边幂迭代**高效获得（避免 SVD）。
+脚本：
+```
 
-通过拉格朗日乘子法，将约束嵌入目标函数，可得最优解形式为：
-
-\[
-\Phi(\lambda) \;=\; \operatorname{msign}(G + \lambda \Theta).
-\]
-
-于是原约束 \( \langle \Theta, \Phi(\lambda) \rangle = 0 \) 转化为非线性方程：
-
-\[
-f(\lambda) \;:=\; \langle \Theta, \operatorname{msign}(G + \lambda \Theta) \rangle \;=\; 0.
-\]
-
-由于 `msign(·)` 隐含矩阵平方根与逆运算，**该方程通常无解析解**，必须依赖**数值迭代法**求解 λ。本仓库提供了 4 种常用策略，覆盖无导数与有导数两类情形。
-
----
-
-## 数学推导与各算法要点
-
-### 统一记号
-
-- \( Z = G + \lambda \Theta \)
-- \( \Phi = \operatorname{msign}(Z) = Z (Z^\top Z)^{-1/2} \)
-- \( X = \Theta^\top \Phi \)
-- **关键恒等式**：  
-  \[
-  q \;:=\; Z^\top \Phi \;=\; (Z^\top Z)^{1/2}
-  \]
-  此恒等式使我们**无需显式计算矩阵平方根或逆**，只需 `q = Z^T Φ` 即可。
-- 目标函数：\( f(\lambda) = \langle \Theta, \Phi(\lambda) \rangle = \mathrm{tr}(X) \)
-
-#### 初始值（通用）
-所有方法推荐使用同一初始值：
-\[
-\lambda_0 \;=\; - \frac{\mathrm{tr}(\Theta^\top G)}{\mathrm{tr}(\Theta^\top \Theta)}.
-\]
-
----
-
-### 1) 固定点法（`solver/fix_point.py`）
-
-基于恒等式推导出的显式更新公式：
-\[
-\lambda \;=\; \frac{
-  \mathrm{tr}(\Theta^\top \Phi \, q)
-  - \frac{\mathrm{tr}(\Theta^\top \Phi)\,\mathrm{tr}(q)}{m}
-  - \mathrm{tr}(\Theta^\top G)
-}{
-  \mathrm{tr}(\Theta^\top \Theta)
-}.
-\]
-
-**实现细节**：
-- 构造固定点迭代：\( \lambda_{k+1} \leftarrow \text{RHS}(\lambda_k) \)
-- \( q = Z^\top \Phi \) 直接由 `msign` 输出计算，避免显式 `(Z^T Z)^{1/2}`
-- **双重收敛准则**：  
-  \( |f(\lambda)| = |\mathrm{tr}(X)| \) 与相对变化 \( |\Delta \lambda| / |\lambda| \) 同时小于阈值
-- 使用 CUDA events 精确计时，日志包含 `ms_per_step`
-
----
-
-### 2) 割线法（`solver/secant.py`）
-
-经典无导数一元方程求根方法，仅需函数值。
-
-**更新公式**：
-\[
-\lambda_{k+1} = \lambda_k - f(\lambda_k) \cdot \frac{\lambda_k - \lambda_{k-1}}{f(\lambda_k) - f(\lambda_{k-1})}.
-\]
-
-- 建议先通过 `find_bracket` 获取初始区间以提高稳定性
-- 不保证全局收敛，但局部收敛较快
-
----
-
-### 3) Brent 法（`solver/brent.py`）
-
-融合二分法、割线法与逆二次插值的**稳健求根算法**。
-
-- **要求**：存在区间 \([a, b]\) 使得 \( f(a) f(b) \leq 0 \)
-- 在本实现中，函数评估在 GPU 上完成，标量逻辑在 CPU 侧执行
-- 收敛性有理论保证，适合对鲁棒性要求高的场景
-
----
-
-### 4) Newton 法（`solver/newton.py`）
-
-若可获得导数 \( f'(\lambda) \)，则具有**二次收敛速度**。
-
-**更新公式**：
-\[
-\lambda_{k+1} = \lambda_k - \frac{f(\lambda_k)}{f'(\lambda_k)}.
-\]
-
-- **优先使用解析梯度**：通过 `dmsign.py` 提供的 VJP 计算  
-  \[
-  f'(\lambda) = \langle \Theta, \; \mathrm{d}\Phi/\mathrm{d}A \,[\Theta] \rangle
-  \]
-- **回退方案**：若无解析导数，则使用中心差分近似 \( f'(\lambda) \)
-
----
-
-## GPU 友好实现要点
-
-- ✅ **`msign`**：采用 Polar-Express 多项式迭代，支持 BF16/FP32 混合精度，避免 SVD
-- ✅ **`Θ` 构造**：通过双边幂迭代（仅 GEMM/GEMV）获取最大奇异向量
-- ✅ **关键技巧**：利用 \( q = Z^\top \Phi \) 替代显式矩阵平方根
-- ✅ **数值稳定**：标量运算尽量保留在 GPU 上，仅日志输出时转为 Python float
-- ✅ **精确计时**：使用 CUDA events 统计每步耗时
-
----
-
-## 评估指标与日志字段
-
-所有方法通过 `root_solver.py` 输出统一格式日志，`scripts/parse_logs_to_csv.sh` 可将其解析为 CSV。关键字段如下：
-
-| 字段 | 含义 |
-|------|------|
-| `lambda` | 最终解 \( \lambda^* \) |
-| `abs_f` | \( |f(\lambda^*)| = |\mathrm{tr}(\Theta^\top \Phi)| \)，即**约束残差** |
-| `abs_constraint` | 固定点法内部即时约束残差 |
-| `iters` | 迭代次数 |
-| `fevals` | 函数评估次数（Brent/Secant） |
-| `time_ms` | 总耗时（毫秒） |
-| `ortho_err` | \( \|\Phi^\top \Phi - I\|_F / m \)，用于诊断**半正交一致性** |
-| `bracket_lo/hi` | Brent/Secant 的初始括号区间（若存在） |
-
-这些指标帮助你在**收敛性**、**精度**与**效率**之间进行权衡：
-- **固定点法**：步数少、单步贵（依赖 `msign`），但完全 GPU 化
-- **Brent 法**：稳健可靠，适合黑盒场景
-- **Newton 法**：若有解析梯度，通常收敛最快
-
----
-
-## 安装与运行
-
-### 前置条件
-- Python ≥ 3.8
-- PyTorch + CUDA（确保 `torch.cuda.is_available()` 为 `True`）
-
-### 快速开始
-```bash
-# 赋予脚本执行权限
-chmod +x scripts/*.sh
-
-# 1. 快速自测（小规模，全方法）
+# 1) 小规模全方法自测
 bash scripts/check_each_solver.sh
 
-# 2. 批量评测（多尺寸/多方法，生成 CSV）
-bash scripts/benchmark_methods.sh
-# 结果保存至: results/benchmarks.csv
+# 2) 多尺寸/多方法评测并汇总 CSV（注意文件名是 becnmark_methods.sh）
+SIZES="128x64 256x128" METHODS="bisection brent newton" \
+THETA_SOURCE=power POWER_ITERS=3 TOL=1e-8 MAX_ITER=100 MSIGN_STEPS=5 \
+bash scripts/becnmark_methods.sh
 
-# 3. msign 迭代步数灵敏度分析
+# 3) msign 步数灵敏度
+METHOD=fixed_point N=128 M=256 THETA_SOURCE=power POWER_ITERS=3 \
 bash scripts/sweep_msign_steps.sh
-# 结果保存至: results/sweep_msign_steps.csv
-```
-
-### 自定义参数
-所有脚本支持通过环境变量覆盖默认值，例如：
-```bash
-SIZES="128x64 256x128" \
-METHODS="fixed_point newton" \
-SEED=7 \
-TOL=1e-6 \
-MAX_ITER=50 \
-MSIGN_STEPS=7 \
-bash scripts/benchmark_methods.sh
 ```
 
 ---
 
-## 复现注意事项
+## 日志字段与判据
 
-- **随机性控制**：`root_solver.py` 通过 `--seed` 控制 `G` 和 `W` 的生成；`Θ` 由 `W` 的最大奇异向量决定
-- **dmsign 可选**：若提供 `kernels/dmsign.py`，Newton 法将使用解析梯度；否则回退至有限差分
-- **数值稳定性**：全程使用 FP32 累加；`msign` 内部包含安全缩放与 NaN/Inf 兜底处理
+统一由 `root_solver.py` 打印：
+- `f(0)`：λ=0 时的函数值（便于了解初始偏差）。
+- `orthogonality error @λ`：半正交一致性误差 `‖ΦᵀΦ − I‖_F / m`（诊断 msign 质量）。
+- 结果：
+  - `λ*`：最终解
+  - `|f(λ*)|`：残差（唯一收敛判据，≤ `--tol` 即视为收敛）
+  - `iters`：迭代步数（唯一统计的步数指标）
+  - `converged`：是否满足收敛
+  - `time`：求解耗时（毫秒）
+  - `bracket`：如适用，显示括号区间
+
+CSV（`scripts/parse_logs_to_csv.sh`）会将日志解析为表格，字段包含：`lambda, abs_f, iters, time_ms, ortho_err, bracket_lo/hi` 等。
 
 ---
 
-## 引用与参考
+## 求解器简介
 
-- “流形上的最速下降”系列文章（谱球面 / 正交 / Stiefel 约束优化）
-- **Polar Express**: 高效矩阵函数的多项式迭代方法（[arXiv:2505.16932](https://arxiv.org/abs/2505.16932)）
-- **数值分析标准方法**: Brent, Secant, Newton 求根算法
+- 固定点法 `solver/fix_point.py`
+  - 显式更新：λ ← [ tr(Xq) − tr(X)·tr(q)/m − tr(ΘᵀG) ] / tr(ΘᵀΘ)，其中 X=ΘᵀΦ, q=ZᵀΦ；全流程 GPU。
+
+- 二分法 `solver/bisection.py`
+  - 单调性来自 ∥G+λΘ∥_* 的凸性；需括号区间；线性收敛，鲁棒。
+
+- Brent 法 `solver/brent.py`
+  - 需括号区间；融合二分/割线/逆二次插值，在保证性的同时更快。
+
+- 割线法 `solver/secant.py`
+  - 无导数；使用最近两步值做线性外推；常配合括号获取初始两点。
+
+- Newton 法 `solver/newton.py`
+  - 有导数时收敛快：优先用 `kernels/dmsign.py` 的 VJP，缺少时回退中心差分。
+
+---
+
+## 记号与实现要点（简）
+
+- 记号：Z=G+λΘ，Φ=msign(Z)，X=ΘᵀΦ，q=ZᵀΦ=(ZᵀZ)^{1/2}
+- 关键：q=ZᵀΦ 避免显式矩阵平方根/逆
+- Θ 构造：`--theta_source power|svd`（power 仅 GEMM/GEMV；svd 供基准）
+- msign：Polar‑Express 多项式迭代，BF16/FP32 混合精度；`--msign_steps` 控制精度/速度
+- 数值：内积/trace 统一 FP32 累加；仅打印时转 Python float
+
+---
+
+## 复现与扩展
+
+- 随机性：通过 `--seed` 控制；Θ 由 W 的最大奇异向量外积得到
+- 解析梯度：提供 `kernels/dmsign.py` 则 Newton 使用解析 VJP；否则自动用差分
+- 扩展新方法：实现 `solve_with_xxx(G, Θ, ..., msign_steps)` 并返回 `SolverResult`；用 `compute_f/compute_phi` 即可
+
+---
+
+## 背景简介
+
+从拉格朗日乘子推导可得 Φ(λ)=msign(G+λΘ)，从而 f(λ)=⟨Θ,Φ(λ)⟩=0。由于 msign(·) 隐含矩阵平方根/逆，通常无解析解，需数值法求 λ。我们的实现彻底 GPU 化，避免 SVD 主路径，便于在实际深度学习/几何优化中使用与评测。
+

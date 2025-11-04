@@ -72,7 +72,6 @@ def solve_with_newton(
         step = f / df_dlambda
         next_lambda = lambda_value - step
 
-        # 不使用 |Δλ| 的早停，继续迭代直到 |f| 达标或达到上限
 
         lambda_value = next_lambda
         f = compute_f(G, Theta, lambda_value, msign_steps)
