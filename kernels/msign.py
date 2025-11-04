@@ -76,3 +76,27 @@ def msign(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
 
     # 返回 float32（兼容下游）
     return x.float()
+
+
+@torch.no_grad()
+def msign_accurate(g: torch.Tensor):
+    """
+    奇异值分解精确计算 msign（PyTorch 版本）
+    与 numpy 版保持一致：msign(g) = U · sign(S) · Vh
+    - g: (..., m, n) 的实数或复数张量，支持批量 SVD
+    - steps: 为兼容原函数签名，未使用
+    返回: 与 g 同形状的张量
+    """
+    # torch.linalg.svd 支持批量，返回 U, S, Vh
+    # full_matrices=False 保持与 numpy 版本一致的经济型 SVD
+    U, S, Vh = torch.linalg.svd(g, full_matrices=False)
+
+    # 对奇异值取符号。注意 sign(0)=0，和 numpy 一致
+    S_sign = torch.sign(S)
+
+    # 将 sign(S) 作为对角矩阵，再做 U @ diag @ Vh
+    # 对批量情况，需构造对角块
+    # torch.diag_embed 会把 (..., k) -> (..., k, k)
+    S_sign_diag = torch.diag_embed(S_sign)
+
+    return U @ S_sign_diag @ Vh
