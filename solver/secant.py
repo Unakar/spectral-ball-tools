@@ -39,11 +39,10 @@ def solve_with_secant(
     f0 = compute_f(G, Theta, x0, msign_steps)
     f1 = compute_f(G, Theta, x1, msign_steps)
 
-    history: Dict[str, Any] = {"solution": [x0, x1], "residual": [f0, f1]}
 
     for it in range(2, max_iterations + 1):
         if abs(f1) <= tolerance_f:
-            return SolverResult("secant", x1, abs(f1), it, True, time.perf_counter() - start, history=history)
+            return SolverResult("secant", x1, abs(f1), it, True, time.perf_counter() - start)
 
         denom = f1 - f0
         if denom == 0.0 or not math.isfinite(denom):
@@ -53,7 +52,5 @@ def solve_with_secant(
 
         x0, f0, x1 = x1, f1, x2
         f1 = compute_f(G, Theta, x1, msign_steps)
-        history["solution"].append(x1)
-        history["residual"].append(f1)
 
-    return SolverResult("secant", x1, abs(f1), max_iterations, False, time.perf_counter() - start, history=history)
+    return SolverResult("secant", x1, abs(f1), max_iterations, False, time.perf_counter() - start)
