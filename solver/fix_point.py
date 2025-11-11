@@ -69,6 +69,8 @@ def solve_with_fixed_point(
         numerator = tr_Xq - tr_X * tr_q / m - tr_Th_G
         lam = numerator / (tr_Th_Th + 1e-30)
 
+        # print('step:', it, ', lam:', lam, ', inner product:', inner_product(Phi, G), ', tangent error:', inner_product(Theta, Phi))
+
     # Max iterations reached
     return SolverResult("fixed_point", float(lam.item()), f_abs, max_iterations, False,
                         time.perf_counter() - start, history=history)
