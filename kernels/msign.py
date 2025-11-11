@@ -1,46 +1,44 @@
-from itertools import chain, islice, repeat
 import torch
+from typing import Optional
 
-our_coeffs_list = [
-    (8.28721201814563, -23.595886519098837, 17.300387312530933),
-    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
-    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
-    (3.3184196573706015, -2.488488024314874, 0.51004894012372),
-    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
-    (1.891301407787398, -1.2679958271945868, 0.37680408948524835),
-    (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
-    (1.875, -1.25, 0.375),
-]
 
-def deflate(abc, deflation_eps):
-    a, b, c = abc
-    return a / (1 + deflation_eps), b / (1 + deflation_eps)**3, c / (1 + deflation_eps)**5
+def _muon_newton_schulz_step(
+    X: torch.Tensor, a: float, b: float, c: float
+) -> torch.Tensor:
+    A = X @ X.mT
+    B = torch.addmm(A, A, A, alpha=c, beta=b)
+    X = torch.addmm(X, B, X, alpha=1.0, beta=a)
+    return X
 
 
 @torch.compile
-def msign(G: torch.Tensor, steps: int):
-    assert G.ndim >= 2, "Input tensor must have at least two dimensions."
-    assert steps > 0, "Number of steps must be positive."
-    deflation_eps = 0.01
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):  # opposite convention from our other code
-        X = X.mT
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * (1 + deflation_eps) + 1e-7)
-    # NOTE: it's very important to make `hs` a plain list, not an iterator.
-    # Don't do any CPU operations inside the loop, just GPU ops.
-    # Otherwise it could seriously slow down the code.
-    hs = [deflate(coefffs, deflation_eps) for coefffs in chain(
-        islice((our_coeffs_list), steps),
-        repeat(our_coeffs_list[-1], max(0, steps - len(our_coeffs_list))),
-    )]
+def msign(G: torch.Tensor, steps: int) -> torch.Tensor:
+    if G.ndim < 2:
+        raise ValueError("Input tensor must have at least 2 dimensions.")
+    if G.dtype != torch.float32:
+        G = G.float()
 
-    for a, b, c in hs:
-        A = X @ X.mT
-        B = b * A + c * A @ A
-        X = a * X + B @ X
-  
-    if G.size(-2) > G.size(-1):
+    transpose = G.size(-2) > G.size(-1)
+    X = G.mT if transpose else G
+
+    X = X / X.norm(dim=(-2, -1), keepdim=True).clamp_min(1e-7)
+
+    coeffs = [
+        (7.2086, -15.5131, 9.0178),
+        (3.9623, -2.5813, 0.4542),
+        (3.9466, -2.5765, 0.4544),
+        (3.8991, -2.5671, 0.4566),
+        (3.7186, -2.5308, 0.4653),
+        (3.1390, -2.3073, 0.4733),
+        (2.1715, -1.5246, 0.3885),
+        (1.8648, -1.2224, 0.3577),
+    ]
+
+    for i in range(steps):
+        a, b, c = coeffs[i % 8]
+        X = _muon_newton_schulz_step(X, a, b, c)
+
+    if transpose:
         X = X.mT
+
     return X
-

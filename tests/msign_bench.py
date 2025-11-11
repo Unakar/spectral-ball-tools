@@ -1,6 +1,16 @@
 # bench_msign.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
+
+import sys
+import os
+
+
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import argparse
 import math
 import time
