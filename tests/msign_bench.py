@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple, Optional
 
 import torch
-from kernels.msign import msign  
+from kernels.msign import msign  # 需保证可导入
 
 # -----------------------------------------------------------------------------
 # 环境与辅助
@@ -44,6 +44,8 @@ def estimate_flops_per_step(shape: Tuple[int, int]) -> float:
 # -----------------------------------------------------------------------------
 @torch.no_grad()
 def orthogonality_error(U: torch.Tensor) -> float:
+    # 统一使用 float32 做指标计算，避免 dtype 不匹配
+    U = U.float()
     m, n = U.shape[-2], U.shape[-1]
     if m <= n:
         I = torch.eye(m, device=U.device, dtype=torch.float32)
@@ -56,19 +58,23 @@ def orthogonality_error(U: torch.Tensor) -> float:
 @torch.no_grad()
 def polar_reconstruction_residual(G: torch.Tensor, U: torch.Tensor) -> float:
     # 以 U (U^T G) 作为极分解的“正交部分”投影重建，计算相对残差
+    U = U.float()
+    G = G.float()
     recon = U @ (U.mT @ G)
     num = torch.linalg.norm(G - recon, ord="fro")
     den = torch.linalg.norm(G, ord="fro").clamp_min(1e-20)
     return float((num / den).item())
 
 @torch.no_grad()
-def svd_polar_error(G: torch.Tensor, U_est: torch.Tensor) -> Optional[float]:
+def svd_polar_error(G: torch.Tensor, U: torch.Tensor) -> Optional[float]:
     # 仅小尺寸上做 SVD 基准
-    m, n = G.shape[-2], G.shape[-1]
+    Gf = G.float()
+    U_est = U.float()
+    m, n = Gf.shape[-2], Gf.shape[-1]
     try:
-        U, S, Vh = torch.linalg.svd(G.float(), full_matrices=False)
-        U_svd = U @ Vh
-        num = torch.linalg.norm(U_est.float() - U_svd, ord="fro")
+        U_svd, S, Vh = torch.linalg.svd(Gf, full_matrices=False)
+        U_svd = U_svd @ Vh
+        num = torch.linalg.norm(U_est - U_svd, ord="fro")
         den = torch.linalg.norm(U_svd, ord="fro").clamp_min(1e-20)
         return float((num / den).item())
     except RuntimeError:
@@ -125,7 +131,6 @@ def run_bench(cfg: BenchConfig) -> List[BenchResult]:
     # 原来是 'cpu'，这里改成跟随实际 device
     gen = torch.Generator(device=device.type).manual_seed(cfg.seed)
 
-
     results: List[BenchResult] = []
 
     for (m, n) in cfg.shapes:
@@ -148,13 +153,18 @@ def run_bench(cfg: BenchConfig) -> List[BenchResult]:
             for _ in range(cfg.trials):
                 t = time_once(lambda: msign(G, steps=steps), device)
                 times.append(t)
+
             # 额外再跑一次拿 U 用于指标
             U = msign(G, steps=steps)
 
-            ortho_err = orthogonality_error(U)
-            polar_resid = polar_reconstruction_residual(G, U)
+            # 统一在指标计算中使用 float32，避免 dtype 冲突
+            U_f32 = U.float()
+            G_f32 = G.float()
+
+            ortho_err = orthogonality_error(U_f32)
+            polar_resid = polar_reconstruction_residual(G_f32, U_f32)
             if max(m, n) <= cfg.svd_max_dim:
-                svd_err = svd_polar_error(G, U)
+                svd_err = svd_polar_error(G_f32, U_f32)
 
             mean_t = float(torch.tensor(times).mean().item())
             std_t = float(torch.tensor(times).std(unbiased=False).item())
