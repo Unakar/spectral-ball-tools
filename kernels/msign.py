@@ -32,7 +32,7 @@ def msign(G: torch.Tensor, steps: int):
     # Otherwise it could seriously slow down the code.
     hs = [deflate(coefffs, deflation_eps) for coefffs in chain(
         islice((our_coeffs_list), steps),
-        repeat(our_coeffs_list[-1], steps - len(our_coeffs_list)),
+        repeat(our_coeffs_list[-1], max(0, steps - len(our_coeffs_list))),
     )]
 
     for a, b, c in hs:
