@@ -131,3 +131,52 @@ def solve_with_brent(
         fb = compute_f(G, Theta, b, msign_steps)
 
     return SolverResult("brent", b, abs(fb), max_iterations, False, time.perf_counter() - start, (a, b))
+
+
+# -----------------------------------------------------------------------------
+# High-level helper: bracket + Brent solver wrapped together
+# -----------------------------------------------------------------------------
+@torch.no_grad()
+def solve_lambda_with_brent(
+    G: torch.Tensor,
+    Theta: torch.Tensor,
+    initial_guess: float = 0.0,
+    initial_step: float = 1.0,
+    tolerance_f: float = 1e-8,
+    tolerance_x: float = 1e-10,
+    max_iterations: int = 100,
+    max_expansions: int = 60,
+    msign_steps: int = 5,
+) -> SolverResult:
+    """Full λ solver: find a bracket then run Brent iterations.
+
+    `G` is expected to be the first momentum `M`, not the raw gradient. `Theta` should be the
+    outer product of the leading singular vectors (`u1 v1^T`). All tensors stay on the current
+    device to avoid host/device thrash.
+    """
+    a, b, fa, fb = find_bracket(
+        G,
+        Theta,
+        initial_guess=initial_guess,
+        initial_step=initial_step,
+        max_expansions=max_expansions,
+        msign_steps=msign_steps,
+    )
+
+    # If the bracket degenerates (no sign change found), report failure with the best residual.
+    if fa * fb > 0:
+        residual = min(abs(fa), abs(fb))
+        return SolverResult("brent", initial_guess, residual, 0, False, 0.0, (a, b))
+
+    return solve_with_brent(
+        G,
+        Theta,
+        a=a,
+        b=b,
+        fa=fa,
+        fb=fb,
+        tolerance_f=tolerance_f,
+        tolerance_x=tolerance_x,
+        max_iterations=max_iterations,
+        msign_steps=msign_steps,
+    )
