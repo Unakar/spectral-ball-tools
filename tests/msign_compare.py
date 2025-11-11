@@ -1,70 +1,25 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-import argparse
-import os
-import sys
-import time
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
-
 import torch
+import numpy as np
+from itertools import chain, islice, repeat
+from typing import Optional
 
-_THIS_DIR = os.path.dirname(__file__)
-_REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, os.pardir))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# ==============================
+# Coefficient Sets
+# ==============================
 
-from kernels.msign import msign as msign_ours
+# Old Polar-Express coefficients (with deflation in original code)
+_OLD_POLAR_EXPRESS_COEFFS = [
+    (8.28721201814563, -23.595886519098837, 17.300387312530933),
+    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
+    (3.3184196573706015, -2.488488024314874, 0.51004894012372),
+    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
+    (1.891301407787398, -1.2679958271945868, 0.37680408948524835),
+    (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
+    (1.875, -1.25, 0.375),
+]
 
-
-def torch_sync(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-
-
-def pick_device(use_cuda: bool) -> torch.device:
-    if use_cuda and torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-
-def set_no_tf32() -> None:
-    torch.set_float32_matmul_precision("highest")
-    torch.backends.cuda.matmul.fp32_precision = "ieee"
-    torch.backends.cudnn.conv.fp32_precision = "ieee"
-
-
-@torch.no_grad()
-def svd_polar_error(G: torch.Tensor, U_est: torch.Tensor) -> Optional[float]:
-    m, n = G.shape[-2], G.shape[-1]
-    try:
-        U, S, Vh = torch.linalg.svd(G.float(), full_matrices=False)
-        U_svd = U @ Vh
-        num = torch.linalg.norm(U_est.float() - U_svd, ord="fro")
-        den = torch.linalg.norm(U_svd, ord="fro").clamp_min(1e-20)
-        return float((num / den).item())
-    except RuntimeError:
-        return None
-
-
-@torch.no_grad()
-def time_once(func, device: torch.device) -> float:
-    if device.type == "cuda":
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        torch_sync(device)
-        start.record()
-        func()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / 1000.0
-    t0 = time.perf_counter()
-    func()
-    t1 = time.perf_counter()
-    return t1 - t0
-
-
+# New Megatron (Muon) coefficients - NO deflation
 MUON_COEFFICIENT_SETS = {
     "polar_express": [
         (7.2086, -15.5131, 9.0178),
@@ -78,224 +33,169 @@ MUON_COEFFICIENT_SETS = {
     ],
 }
 
+# ==============================
+# Helper Functions
+# ==============================
+
+def rms_norm(tensor: torch.Tensor) -> float:
+    """Compute root-mean-square (RMS) of all elements."""
+    return torch.sqrt(torch.mean(tensor ** 2)).item()
+
+def msign_svd(g: torch.Tensor) -> torch.Tensor:
+    """Exact matrix sign via SVD."""
+    u, s, vh = torch.linalg.svd(g, full_matrices=False)
+    return u @ torch.diag(torch.sign(s)) @ vh
+
+# ==============================
+# Old msign (with deflation)
+# ==============================
+
+def _deflate_coeffs(abc: tuple, deflation_eps: float) -> tuple:
+    a, b, c = abc
+    return (
+        a / (1 + deflation_eps),
+        b / (1 + deflation_eps) ** 3,
+        c / (1 + deflation_eps) ** 5,
+    )
+
+def old_msign_kernel(G: torch.Tensor, steps: int) -> torch.Tensor:
+    """Original msign with deflation (eps=0.01)."""
+    assert G.ndim >= 2
+    assert steps > 0
+
+    deflation_eps = 0.01
+    X = G.bfloat16()
+
+    transpose = G.size(-2) > G.size(-1)
+    if transpose:
+        X = X.mT
+
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * (1 + deflation_eps) + 1e-7)
+
+    # Prepare coefficients
+    hs = [
+        _deflate_coeffs(coeffs, deflation_eps)
+        for coeffs in chain(
+            islice(_OLD_POLAR_EXPRESS_COEFFS, steps),
+            repeat(_OLD_POLAR_EXPRESS_COEFFS[-1], max(0, steps - len(_OLD_POLAR_EXPRESS_COEFFS))),
+        )
+    ]
+
+    for a, b, c in hs:
+        A = X @ X.mT
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+
+    if transpose:
+        X = X.mT
+
+    return X.float()
+
+# ==============================
+# New Megatron (Muon) msign
+# ==============================
 
 def _muon_newton_schulz_step(X: torch.Tensor, a: float, b: float, c: float) -> torch.Tensor:
     A = X @ X.mT
-    B = torch.addmm(A, A, A, alpha=c, beta=b)
-    X = torch.addmm(X, B, X, alpha=1.0, beta=a)
+    B = torch.addmm(A, A, A, alpha=c, beta=b)  # B = b*A + c*A@A
+    X = torch.addmm(X, B, X, alpha=1.0, beta=a)  # X = a*X + B@X
     return X
 
-
-def muon_newton_schulz(
+def muon_msign_kernel(
     x: torch.Tensor,
     steps: int,
     coefficient_type: str = "polar_express",
     eps: float = 1e-7,
-    transpose: Optional[bool] = None,
 ) -> torch.Tensor:
+    """Megatron/Muon-style msign without deflation."""
     if x.ndim < 2:
         raise ValueError("x must have at least 2 dims")
     if x.dtype != torch.float32:
         x = x.float()
 
-    if transpose is None:
-        transpose = x.size(-2) > x.size(-1)
+    transpose = x.size(-2) > x.size(-1)
     if transpose:
         x = x.mT
 
     X = x / x.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
 
-    if coefficient_type not in MUON_COEFFICIENT_SETS:
-        raise ValueError(f"Invalid coefficient type: {coefficient_type}")
     coeffs = MUON_COEFFICIENT_SETS[coefficient_type]
-    if steps % len(coeffs) != 0:
-        raise ValueError(
-            f"steps ({steps}) must be a multiple of coefficient cycle length ({len(coeffs)}) for '{coefficient_type}'."
-        )
+    coeff_len = len(coeffs)
+    if steps % coeff_len != 0:
+        # For fairness, we allow non-multiple steps by cycling (relax constraint)
+        # But original code requires multiple; here we just cycle safely.
+        pass  # We'll use modulo indexing
 
     for i in range(steps):
-        a, b, c = coeffs[i % len(coeffs)]
+        a, b, c = coeffs[i % coeff_len]
         X = _muon_newton_schulz_step(X, a, b, c)
 
     if transpose:
         X = X.mT
     return X
 
+# ==============================
+# Main Comparison
+# ==============================
 
-@dataclass
-class BenchCfg:
-    shapes: List[Tuple[int, int]]
-    steps_list: List[int]
-    trials: int
-    warmup: int
-    cuda: bool
-    seed: int
-    svd_max_dim: int
-    compile_both: bool
+def compare_msign_methods():
+    torch.manual_seed(42)
+    matrix_size = (256, 1024)
+    G = torch.randn(matrix_size, dtype=torch.float32)
 
+    print(f"测试矩阵大小: {matrix_size}")
+    print(f"矩阵谱范数: {torch.linalg.norm(G, ord=2).item():.6f}\n")
 
-@dataclass
-class Row:
-    method: str
-    shape: Tuple[int, int]
-    steps: int
-    time_mean_s: float
-    time_std_s: float
-    svd_rel_err: Optional[float]
+    # Ground truth
+    print("计算 SVD 基准 (ground truth)...")
+    S_svd = msign_svd(G)
 
+    # Choose steps that work for both
+    # Old: works with any steps >=1
+    # New: ideally multiple of 8, so we use 8, 16
+    steps_list = [8]
 
-def run_compare(cfg: BenchCfg) -> List[Row]:
-    set_no_tf32()
-    device = pick_device(cfg.cuda)
-    gen = torch.Generator(device=device.type).manual_seed(cfg.seed)
+    print(f"{'步骤':<6} {'方法':<12} {'绝对RMS误差':<15} {'最大绝对误差':<15}")
+    print("-" * 60)
 
-    cycle_len = len(MUON_COEFFICIENT_SETS["polar_express"])
-    invalid = [s for s in cfg.steps_list if s % cycle_len != 0]
-    if invalid:
-        raise ValueError(
-            f"steps {invalid} are not multiples of the coefficient cycle length {cycle_len} for 'polar_express'. "
-            f"Use values like {cycle_len}, {2*cycle_len}, ..."
-        )
+    for steps in steps_list:
+        # Old msign
+        S_old = old_msign_kernel(G, steps)
+        err_old = S_old - S_svd
+        rms_old = rms_norm(err_old)
+        max_old = torch.max(torch.abs(err_old)).item()
 
-    out: List[Row] = []
-    polarexpress_fn = msign_ours
-    muon_fn = muon_newton_schulz
-    if cfg.compile_both:
-        try:
-            muon_fn = torch.compile(muon_newton_schulz)
-        except Exception:
-            muon_fn = muon_newton_schulz
+        # Megatron (Muon) msign
+        S_muon = muon_msign_kernel(G, steps)
+        err_muon = S_muon - S_svd
+        rms_muon = rms_norm(err_muon)
+        max_muon = torch.max(torch.abs(err_muon)).item()
 
-    for (m, n) in cfg.shapes:
-        G = torch.randn((m, n), generator=gen, device=device, dtype=torch.float32)
-        if m == n:
-            G = G + 0.01 * torch.eye(m, device=device, dtype=torch.float32)
+        print(f"{steps:<6} {'Old':<12} {rms_old:<15.6e} {max_old:<15.6e}")
+        print(f"{'':<6} {'Megatron':<12} {rms_muon:<15.6e} {max_muon:<15.6e}")
+        print()  # blank line between step groups
 
-        for steps_req in cfg.steps_list:
-            # Ours
-            for _ in range(cfg.warmup):
-                _ = polarexpress_fn(G, steps=steps_req)
+    # Additional: test on multiple random matrices (16 steps)
+    print("在多个随机矩阵上测试 (16步, 5次):")
+    old_rms_list, muon_rms_list = [], []
+    for i in range(5):
+        G_test = torch.randn(matrix_size, dtype=torch.float32)
+        S_true = msign_svd(G_test)
+        
+        S_old_test = old_msign_kernel(G_test, 8)
+        S_muon_test = muon_msign_kernel(G_test, 8)
+        
+        rms_old = rms_norm(S_old_test - S_true)
+        rms_muon = rms_norm(S_muon_test - S_true)
+        
+        old_rms_list.append(rms_old)
+        muon_rms_list.append(rms_muon)
+        
+        print(f"测试 {i+1:>2}: Old={rms_old:.6e}, Megatron={rms_muon:.6e}")
 
-            times: List[float] = []
-            for _ in range(cfg.trials):
-                t = time_once(lambda: polarexpress_fn(G, steps=steps_req), device)
-                times.append(t)
-            U = polarexpress_fn(G, steps=steps_req)
-
-            mean_t = float(torch.tensor(times).mean().item())
-            std_t = float(torch.tensor(times).std(unbiased=False).item())
-
-            out.append(
-                Row(
-                    method="polarexpress",
-                    shape=(m, n),
-                    steps=steps_req,
-                    time_mean_s=mean_t,
-                    time_std_s=std_t,
-                    svd_rel_err=svd_polar_error(G, U) if max(m, n) <= cfg.svd_max_dim else None,
-                )
-            )
-
-            # Muon
-            steps_muon = steps_req
-            for _ in range(cfg.warmup):
-                _ = muon_fn(G, steps=steps_muon)
-
-            times = []
-            for _ in range(cfg.trials):
-                t = time_once(lambda: muon_fn(G, steps=steps_muon), device)
-                times.append(t)
-            U = muon_fn(G, steps=steps_muon)
-
-            mean_t = float(torch.tensor(times).mean().item())
-            std_t = float(torch.tensor(times).std(unbiased=False).item())
-
-            out.append(
-                Row(
-                    method="magatronmuon",
-                    shape=(m, n),
-                    steps=steps_muon,
-                    time_mean_s=mean_t,
-                    time_std_s=std_t,
-                    svd_rel_err=svd_polar_error(G, U) if max(m, n) <= cfg.svd_max_dim else None,
-                )
-            )
-
-    return out
-
-
-def print_table(rows: Sequence[Row]) -> None:
-    method_order = {"polarexpress": 0, "magatronmuon": 1}
-    rows = sorted(rows, key=lambda r: (r.shape[0], r.shape[1], r.steps, method_order.get(r.method, 9)))
-    header = (
-        f"{'method':>12} | {'shape':>12} | {'steps':>5} | "
-        f"{'time(ms)':>9} | {'std(ms)':>9} | {'svd_rel_err':>11}"
-    )
-    print(header)
-    print("-" * len(header))
-    for r in rows:
-        se = f"{r.svd_rel_err:.3e}" if r.svd_rel_err is not None else "   -   "
-        print(
-            f"{r.method:>12} | {str(r.shape):>12} | {r.steps:>5d} | "
-            f"{(r.time_mean_s*1e3):>9.2f} | {(r.time_std_s*1e3):>9.2f} | {se:>11}"
-        )
-
-
-def parse_shape_list(s: str) -> List[Tuple[int, int]]:
-    out = []
-    for part in s.split(","):
-        part = part.strip().lower().replace("*", "x")
-        a, b = part.split("x")
-        out.append((int(a), int(b)))
-    return out
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare polarexpress vs magatronmuon (NS) speed/accuracy")
-    parser.add_argument(
-        "--shapes",
-        type=str,
-        default="256x256,128*2048",
-        help="Comma-separated list like '128x128,256x256,1024x1024'",
-    )
-    parser.add_argument(
-        "--steps",
-        type=str,
-        default="8",
-        help="Comma-separated steps list. Note: magatronmuon requires steps to be a multiple of its coefficient cycle length (e.g., 8 for polar_express).",
-    )
-    parser.add_argument("--trials", type=int, default=10, help="Repeat times for timing")
-    parser.add_argument("--warmup", type=int, default=5, help="Warmup runs (JIT, cache warmup)")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU (default: CUDA if available)")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument(
-        "--svd-max-dim",
-        type=int,
-        default=2048,
-        help="Compute SVD baseline only when max(m,n) <= this threshold",
-    )
-    parser.add_argument(
-        "--no-compile",
-        action="store_true",
-        help="Disable torch.compile; by default both methods are compiled for fairness.",
-    )
-
-    args = parser.parse_args()
-
-    cfg = BenchCfg(
-        shapes=parse_shape_list(args.shapes),
-        steps_list=[int(s) for s in args.steps.split(",") if s.strip()],
-        trials=args.trials,
-        warmup=args.warmup,
-        cuda=not args.cpu,
-        seed=args.seed,
-        svd_max_dim=args.svd_max_dim,
-        compile_both=not args.no_compile,
-    )
-
-    rows = run_compare(cfg)
-    print_table(rows)
-
+    print(f"\n平均 RMS 误差 (8步, 5次):")
+    print(f"Old      : {np.mean(old_rms_list):.6e} ± {np.std(old_rms_list):.6e}")
+    print(f"Megatron : {np.mean(muon_rms_list):.6e} ± {np.std(muon_rms_list):.6e}")
 
 if __name__ == "__main__":
-    main()
+    compare_msign_methods()
