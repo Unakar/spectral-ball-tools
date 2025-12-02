@@ -188,17 +188,22 @@ def find_zero_point(G: torch.Tensor, Theta: torch.Tensor,
         return 0.0, False
 
 
-def plot_f_lambda(
+def plot_f_lambda_single(
     G: torch.Tensor,
     Theta: torch.Tensor,
     lambda_range: Tuple[float, float] = (-0.1, 0.1),
     num_points: int = 200,
     msign_steps: int = 8,
     title: str = "f(λ) = <Θ, msign(G + λ·Θ)>",
-    save_path: str = None
+    save_path: str = None,
+    show_plot: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """
-    Plot f(lambda) and mark the zero point.
+    Plot f(lambda) and mark the zero point for a single (G, Theta) pair.
+
+    NOTE: This is kept mainly for reference / backward-compatibility.
+    The main test loop below now uses a multi-repeat version that overlays
+    multiple curves in one figure and computes statistics.
 
     Args:
         G: Gradient tensor
@@ -208,6 +213,7 @@ def plot_f_lambda(
         msign_steps: Number of msign steps
         title: Plot title
         save_path: Path to save the plot (optional)
+        show_plot: Whether to immediately show this single plot
 
     Returns:
         lambdas: Array of lambda values
@@ -244,7 +250,128 @@ def plot_f_lambda(
 
     plt.tight_layout()
 
+    if show_plot:
+        plt.show()
+
     return lambdas, f_values, zero_point
+
+
+def plot_f_lambda_multi_repeat(
+    m: int,
+    n: int,
+    mean: float,
+    std: float,
+    lambda_range: Tuple[float, float] = (-0.1, 0.1),
+    num_points: int = 200,
+    msign_steps: int = 8,
+    n_repeats: int = 5,
+    base_seed: int = 42,
+    title: str = "f(λ) = <Θ, msign(G + λ·Θ)>",
+    save_path: str = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Do n_repeats experiments for a given (m, n, mean, std) config, plot all f(λ)
+    curves in one figure, and compute statistics over repeats.
+
+    Args:
+        m, n: Matrix size
+        mean, std: Initialization config
+        lambda_range: Range of lambda values to plot
+        num_points: Number of points to sample
+        msign_steps: Number of msign steps
+        n_repeats: Number of independent repeats
+        base_seed: Base random seed; different repeat uses base_seed + repeat_id
+        title: Plot title
+        save_path: Path to save the plot (optional)
+
+    Returns:
+        lambdas: shape (num_points,)
+        f_values_all: shape (n_repeats, num_points)
+        f_mean: shape (num_points,)
+        f_std: shape (num_points,)
+        zero_points: shape (n_repeats,)
+    """
+    lambda_min, lambda_max = lambda_range
+    lambdas = np.linspace(lambda_min, lambda_max, num_points)
+
+    # Store f(λ) for each repeat: (n_repeats, num_points)
+    f_values_all = np.zeros((n_repeats, num_points), dtype=np.float64)
+    # Store zero point λ* for each repeat
+    zero_points = np.zeros(n_repeats, dtype=np.float64)
+
+    plt.figure(figsize=(10, 6))
+
+    for rep in range(n_repeats):
+        # 使用不同 seed 进行多次独立试验
+        seed = base_seed + rep * 10000
+        G, Theta = generate_test_matrices(m, n, mean, std, seed=seed)
+
+        # 计算这一条曲线的 f(λ)
+        f_values = np.array([compute_f(G, Theta, lam, msign_steps) for lam in lambdas])
+        f_values_all[rep] = f_values
+
+        # 每条曲线独立找零点
+        zero_point, success = find_zero_point(G, Theta, lambda_min, lambda_max, msign_steps)
+        if not success:
+            zero_point = np.nan
+        zero_points[rep] = zero_point
+
+        # 画出这一条 f(λ) 曲线（所有 repeat 画在同一张图上）
+        plt.plot(
+            lambdas, f_values,
+            linewidth=1.5,
+            alpha=0.7,
+            label=f"repeat {rep+1}" if rep == 0 else None,  # 避免太多 legend 项
+        )
+
+    # 对 repeat 维度求 f(λ) 的均值和标准差
+    f_mean = np.nanmean(f_values_all, axis=0)
+    f_std = np.nanstd(f_values_all, axis=0)
+
+    # λ* 的均值和标准差（忽略 NaN）
+    lambda_mean = np.nanmean(zero_points)
+    lambda_std = np.nanstd(zero_points)
+
+    # 在图上再画出 mean 曲线，并加一条 ±std 的带状区域
+    plt.plot(lambdas, f_mean, 'k-', linewidth=2.5, label='mean f(λ) over repeats')
+    plt.fill_between(
+        lambdas,
+        f_mean - f_std,
+        f_mean + f_std,
+        color='gray',
+        alpha=0.2,
+        label='±1 std of f(λ)',
+    )
+
+    # 画基准线
+    plt.axhline(y=0, color='k', linestyle='--', alpha=0.3, label='f(λ) = 0')
+    plt.axvline(x=0, color='gray', linestyle='--', alpha=0.3, label='λ = 0')
+
+    # 在图里标出 λ* 的均值位置
+    if not np.isnan(lambda_mean):
+        # 计算在 λ_mean 处的 f_mean 进行标记（插值）
+        f_at_lambda_mean = np.interp(lambda_mean, lambdas, f_mean)
+        plt.plot(
+            lambda_mean,
+            f_at_lambda_mean,
+            'ro',
+            markersize=8,
+            label=f'λ* mean = {lambda_mean:.3e} ± {lambda_std:.1e}',
+        )
+
+    plt.xlabel('λ', fontsize=12)
+    plt.ylabel('f(λ)', fontsize=12)
+    plt.title(title, fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=9)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Plot saved to {save_path}")
+
+    # 控制外部是否 plt.show()，由 test_f_function 决定
+    return lambdas, f_values_all, f_mean, f_std, zero_points
 
 
 # ============================================================================
@@ -254,13 +381,19 @@ def plot_f_lambda(
 def test_f_function(
     matrix_sizes: list[Tuple[int, int]] = None,
     init_configs: list[Tuple[float, float]] = None,
-    lambda_range: Tuple[float, float] = (-0.1, 0.1),
+    lambda_range: Tuple[float, float] = (-1.0, 1.0),
     msign_steps: int = 8,
     show_plots: bool = True,
-    save_plots: bool = False
+    save_plots: bool = False,
+    n_repeats: int = 5,  # 新增：每个 size & init config 的重复次数
 ):
     """
     Test f(lambda) function for various matrix sizes and initialization configs.
+
+    现在每个 (matrix_size, init_config) 都会做 n_repeats 次独立实验：
+    - 5 条 f(λ) 曲线画在同一张图上
+    - 统计 λ* 的均值和标准差
+    - 统计每个 λ 下 f(λ) 跨 repeat 的均值和标准差
 
     Args:
         matrix_sizes: List of (m, n) matrix size tuples
@@ -269,6 +402,7 @@ def test_f_function(
         msign_steps: Number of msign steps (default 8 for Polar Express)
         show_plots: Whether to display plots
         save_plots: Whether to save plots to files
+        n_repeats: Number of repeats per (size, init) config
     """
     if matrix_sizes is None:
         matrix_sizes = [
@@ -288,6 +422,7 @@ def test_f_function(
 
     print("=" * 80)
     print(f"Testing f(λ) = <Θ, msign(G + λ·Θ)> with {msign_steps}-step msign")
+    print(f"Each (size, init) config is repeated n={n_repeats} times.")
     print("=" * 80)
 
     results = []
@@ -297,58 +432,98 @@ def test_f_function(
             print(f"\nMatrix size: {m} x {n}, Init: mean={mean}, std={std}")
             print("-" * 80)
 
-            # Generate test matrices
-            G, Theta = generate_test_matrices(m, n, mean, std)
-
-            # Check f values at a few points to verify monotonicity
-            test_lambdas = [-1, -0.001, 0.0, 0.001, 1]
-            print(f"Monotonicity check:")
-            for lam in test_lambdas:
-                f_val = compute_f(G, Theta, lam, msign_steps)
-                print(f"  f({lam:+.3f}) = {f_val:+.6e}")
-
-            # Plot f(lambda)
-            title = f"f(λ) for {m}×{n} matrix (mean={mean}, std={std})"
+            # =========================
+            # repeat n 次并画在同一张图上
+            # =========================
+            title = f"f(λ) for {m}×{n} matrix (mean={mean}, std={std}), n={n_repeats}"
             save_path = None
             if save_plots:
-                save_path = f"f_lambda_{m}x{n}_mean{mean}_std{std}.png"
+                save_path = f"f_lambda_{m}x{n}_mean{mean}_std{std}_n{n_repeats}.png"
 
-            lambdas, f_values, zero_point = plot_f_lambda(
-                G, Theta, lambda_range, num_points=20,
-                msign_steps=msign_steps, title=title, save_path=save_path
+            lambdas, f_values_all, f_mean, f_std, zero_points = plot_f_lambda_multi_repeat(
+                m, n,
+                mean, std,
+                lambda_range=lambda_range,
+                num_points=200,
+                msign_steps=msign_steps,
+                n_repeats=n_repeats,
+                base_seed=42,
+                title=title,
+                save_path=save_path,
             )
 
-            # Verify monotonicity numerically
-            is_monotonic = np.all(np.diff(f_values) > 0)
-            print(f"\nMonotonicity verified: {is_monotonic}")
-            if not is_monotonic:
-                # Find where it's not monotonic
-                non_monotonic_idx = np.where(np.diff(f_values) <= 0)[0]
-                print(f"Non-monotonic at indices: {non_monotonic_idx}")
+            # 对每个 repeat 再做一次简单的单点 monotonicity 检查
+            # 这里仅在若干固定 λ 上检查，并输出示例
+            print(f"Monotonicity check on fixed lambdas (per repeat):")
+            test_lambdas = [-1, -0.001, 0.0, 0.001, 1]
+            for rep in range(n_repeats):
+                seed = 42 + rep * 10000
+                G_rep, Theta_rep = generate_test_matrices(m, n, mean, std, seed=seed)
+                print(f"  Repeat {rep + 1} (seed={seed}):")
+                vals = []
+                for lam in test_lambdas:
+                    f_val = compute_f(G_rep, Theta_rep, lam, msign_steps)
+                    vals.append(f_val)
+                    print(f"    f({lam:+.3f}) = {f_val:+.6e}")
+                vals = np.array(vals, dtype=np.float64)
+                is_monotonic = np.all(np.diff(vals) > 0)
+                print(f"    Monotonic over test_lambdas: {is_monotonic}")
 
-            print(f"Zero point: λ* = {zero_point:.10e}")
-            print(f"f(λ*) = {compute_f(G, Theta, zero_point, msign_steps):.6e}")
+            # =========================
+            # 输出 lambda* 的均值和标准差
+            # =========================
+            lambda_mean = np.nanmean(zero_points)
+            lambda_std = np.nanstd(zero_points)
+
+            print("\nZero points across repeats:")
+            for i, z in enumerate(zero_points):
+                print(f"  repeat {i+1}: λ* = {z:.10e}")
+            print(f"λ* mean = {lambda_mean:.10e}, std = {lambda_std:.10e}")
+
+            # =========================
+            # 输出 f(λ) 均值和标准差的一些信息
+            # =========================
+            print("\nSample of f(λ) mean/std over repeats (5 λ-points):")
+            sample_indices = np.linspace(0, len(lambdas) - 1, num=5, dtype=int)
+            for idx in sample_indices:
+                lam = lambdas[idx]
+                print(
+                    f"  λ = {lam:+.3e}: "
+                    f"mean f(λ) = {f_mean[idx]:+.6e}, "
+                    f"std f(λ) = {f_std[idx]:.6e}"
+                )
 
             results.append({
                 'shape': (m, n),
                 'mean': mean,
                 'std': std,
-                'zero_point': zero_point,
-                'is_monotonic': is_monotonic,
+                'lambda_mean': lambda_mean,
+                'lambda_std': lambda_std,
+                'zero_points': zero_points.copy(),
             })
 
     # Summary
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"{'Shape':<15} {'Mean':>8} {'Std':>8} {'Zero Point':>15} {'Monotonic':>10}")
+    print(f"{'Shape':<15} {'Mean':>8} {'Std':>8} {'λ* mean':>15} {'λ* std':>15}")
     print("-" * 80)
     for r in results:
         shape_str = f"{r['shape'][0]}x{r['shape'][1]}"
-        print(f"{shape_str:<15} {r['mean']:>8.3f} {r['std']:>8.3f} {r['zero_point']:>15.6e} {str(r['is_monotonic']):>10}")
+        print(
+            f"{shape_str:<15} "
+            f"{r['mean']:>8.3f} "
+            f"{r['std']:>8.3f} "
+            f"{r['lambda_mean']:>15.6e} "
+            f"{r['lambda_std']:>15.6e}"
+        )
 
     print("\n" + "=" * 80)
-    print(f"All zero points near 0: {all(abs(r['zero_point']) < 0.01 for r in results)}")
+    all_near_zero = all(
+        np.all(np.abs(cfg_result['zero_points']) < 0.01)
+        for cfg_result in results
+    )
+    print(f"All zero points near 0 (|λ*| < 1e-2 for all repeats): {all_near_zero}")
     print("=" * 80)
 
     if show_plots:
@@ -359,7 +534,8 @@ if __name__ == "__main__":
     # Run tests with default configurations
     test_f_function(
         msign_steps=8,  # Use 8-step Polar Express
-        lambda_range=(-0.1, 0.1),
+        lambda_range=(-1.0, 1.0),
         show_plots=True,
-        save_plots=True
+        save_plots=True,
+        n_repeats=5,    # 默认做 5 次 repeat
     )
