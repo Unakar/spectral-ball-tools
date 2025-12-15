@@ -128,7 +128,7 @@ def plot_msign_calls_breakdown(results: list, output_dir: Path):
     ax.set_title('msign Calls Breakdown: Bracket vs Bisection')
     ax.set_xticks(x)
     ax.set_xticklabels(tol_labels)
-    ax.legend(loc='upper left')
+    ax.legend(loc='upper right')
     
     # Add total labels
     for i, (b, bs) in enumerate(zip(bracket_steps, bisect_steps)):
@@ -327,4 +327,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
